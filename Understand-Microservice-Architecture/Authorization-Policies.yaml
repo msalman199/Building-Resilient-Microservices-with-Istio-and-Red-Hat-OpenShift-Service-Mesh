@@ -1,0 +1,17 @@
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: payment-service-policy
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      app: payment-service
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/production/sa/order-service"]
+  - to:
+    - operation:
+        methods: ["POST"]
+        paths: ["/api/v1/payments"]

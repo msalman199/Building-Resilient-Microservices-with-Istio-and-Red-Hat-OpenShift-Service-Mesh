@@ -1,0 +1,12 @@
+# Automatic mTLS - no application changes needed
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: user-service
+        image: user-service:v1
+        # No TLS configuration needed
