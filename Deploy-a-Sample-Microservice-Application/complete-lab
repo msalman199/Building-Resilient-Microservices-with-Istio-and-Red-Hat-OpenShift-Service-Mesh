@@ -1,0 +1,642 @@
+Lab 4: Deploy a Sample Microservice Application
+Objectives
+By the end of this lab, you will be able to:
+
+Deploy a multi-service microservice application on OpenShift
+Configure OpenShift Service Mesh (Istio) to manage microservice communication
+Verify that application services communicate through the service mesh
+Validate traffic routing through Envoy proxies
+Monitor service mesh traffic and observe distributed tracing
+Understand the benefits of service mesh architecture in microservice deployments
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes and OpenShift concepts
+Familiarity with containerized applications and Docker
+Knowledge of YAML configuration files
+Understanding of microservice architecture principles
+Completion of previous OpenShift Service Mesh setup labs
+Basic command-line interface experience
+Required Knowledge Areas
+OpenShift CLI (oc) - Command-line operations
+Service Mesh Concepts - Sidecar proxies, traffic management
+Microservices - Service-to-service communication patterns
+YAML Configuration - Kubernetes resource definitions
+Lab Environment Setup
+Good News! Al Nafi provides you with ready-to-use Linux-based cloud machines. Simply click Start Lab and your environment will be provisioned automatically. No need to build your own VM or install software.
+
+Your lab environment includes:
+
+OpenShift cluster with Service Mesh installed
+Pre-configured CLI tools (oc, kubectl)
+Sample application source code and configurations
+Monitoring and observability tools
+Task 1: Deploy a Simple Microservice Application
+Subtask 1.1: Create Project and Namespace
+First, we'll create a dedicated project for our microservice application.
+
+# Create a new project for the microservice application
+oc new-project bookinfo-microservices
+
+# Verify the project creation
+oc project bookinfo-microservices
+Subtask 1.2: Enable Service Mesh for the Namespace
+Configure the namespace to be part of the service mesh by adding the necessary labels and creating a ServiceMeshMemberRoll.
+
+# Label the namespace for automatic sidecar injection
+oc label namespace bookinfo-microservices istio-injection=enabled
+
+# Verify the label was applied
+oc get namespace bookinfo-microservices --show-labels
+Create a ServiceMeshMemberRoll to include our namespace:
+
+# Create ServiceMeshMemberRoll configuration
+cat << EOF | oc apply -f -
+apiVersion: maistra.io/v1
+kind: ServiceMeshMemberRoll
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  members:
+  - bookinfo-microservices
+EOF
+Subtask 1.3: Deploy the Bookinfo Sample Application
+We'll deploy the classic Bookinfo application, which consists of four microservices: productpage, details, reviews, and ratings.
+
+# Deploy the Bookinfo application
+cat << EOF | oc apply -f -
+# Details service
+apiVersion: v1
+kind: Service
+metadata:
+  name: details
+  labels:
+    app: details
+    service: details
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: details
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-details
+  labels:
+    account: details
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: details-v1
+  labels:
+    app: details
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: details
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: details
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-details
+      containers:
+      - name: details
+        image: docker.io/istio/examples-bookinfo-details-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        securityContext:
+          runAsUser: 1000
+---
+# Ratings service
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratings
+  labels:
+    app: ratings
+    service: ratings
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: ratings
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-ratings
+  labels:
+    account: ratings
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratings-v1
+  labels:
+    app: ratings
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ratings
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: ratings
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-ratings
+      containers:
+      - name: ratings
+        image: docker.io/istio/examples-bookinfo-ratings-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        securityContext:
+          runAsUser: 1000
+---
+# Reviews service v1
+apiVersion: v1
+kind: Service
+metadata:
+  name: reviews
+  labels:
+    app: reviews
+    service: reviews
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: reviews
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-reviews
+  labels:
+    account: reviews
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reviews-v1
+  labels:
+    app: reviews
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reviews
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: reviews
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-reviews
+      containers:
+      - name: reviews
+        image: docker.io/istio/examples-bookinfo-reviews-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: LOG_DIR
+          value: "/tmp/logs"
+        ports:
+        - containerPort: 9080
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: wlp-output
+          mountPath: /opt/ibm/wlp/output
+        securityContext:
+          runAsUser: 1000
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: wlp-output
+        emptyDir: {}
+---
+# Reviews service v2
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reviews-v2
+  labels:
+    app: reviews
+    version: v2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reviews
+      version: v2
+  template:
+    metadata:
+      labels:
+        app: reviews
+        version: v2
+    spec:
+      serviceAccountName: bookinfo-reviews
+      containers:
+      - name: reviews
+        image: docker.io/istio/examples-bookinfo-reviews-v2:1.17.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: LOG_DIR
+          value: "/tmp/logs"
+        ports:
+        - containerPort: 9080
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: wlp-output
+          mountPath: /opt/ibm/wlp/output
+        securityContext:
+          runAsUser: 1000
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: wlp-output
+        emptyDir: {}
+---
+# Productpage service
+apiVersion: v1
+kind: Service
+metadata:
+  name: productpage
+  labels:
+    app: productpage
+    service: productpage
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: productpage
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-productpage
+  labels:
+    account: productpage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: productpage-v1
+  labels:
+    app: productpage
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: productpage
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: productpage
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-productpage
+      containers:
+      - name: productpage
+        image: docker.io/istio/examples-bookinfo-productpage-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        securityContext:
+          runAsUser: 1000
+      volumes:
+      - name: tmp
+        emptyDir: {}
+EOF
+Subtask 1.4: Verify Application Deployment
+Check that all services and pods are running correctly:
+
+# Check all pods are running
+oc get pods -n bookinfo-microservices
+
+# Check all services are created
+oc get services -n bookinfo-microservices
+
+# Verify sidecar injection occurred
+oc get pods -n bookinfo-microservices -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].name}{"\n"}{end}'
+You should see that each pod has two containers: the application container and the istio-proxy sidecar container.
+
+Task 2: Ensure Application Services Communicate via Service Mesh
+Subtask 2.1: Create Gateway and VirtualService
+To enable external access and configure traffic routing through the service mesh, we need to create Istio Gateway and VirtualService resources.
+
+# Create Gateway for external access
+cat << EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: bookinfo-gateway
+  namespace: bookinfo-microservices
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+EOF
+# Create VirtualService for traffic routing
+cat << EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: bookinfo
+  namespace: bookinfo-microservices
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - bookinfo-gateway
+  http:
+  - match:
+    - uri:
+        exact: /productpage
+    - uri:
+        prefix: /static
+    - uri:
+        exact: /login
+    - uri:
+        exact: /logout
+    - uri:
+        prefix: /api/v1/products
+    route:
+    - destination:
+        host: productpage
+        port:
+          number: 9080
+EOF
+Subtask 2.2: Configure DestinationRules
+Create DestinationRules to define service versions and load balancing policies:
+
+# Create DestinationRules for all services
+cat << EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: productpage
+  namespace: bookinfo-microservices
+spec:
+  host: productpage
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: reviews
+  namespace: bookinfo-microservices
+spec:
+  host: reviews
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: ratings
+  namespace: bookinfo-microservices
+spec:
+  host: ratings
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: details
+  namespace: bookinfo-microservices
+spec:
+  host: details
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+EOF
+Subtask 2.3: Test Service-to-Service Communication
+Verify that services can communicate through the service mesh:
+
+# Get the ingress gateway URL
+export INGRESS_HOST=$(oc get route istio-ingressgateway -n istio-system -o jsonpath='{.spec.host}')
+echo "Ingress Host: $INGRESS_HOST"
+
+# Test the application
+curl -s "http://$INGRESS_HOST/productpage" | grep -o "<title>.*</title>"
+Subtask 2.4: Verify Internal Service Communication
+Test internal service communication by executing commands inside a pod:
+
+# Get a productpage pod name
+PRODUCTPAGE_POD=$(oc get pods -n bookinfo-microservices -l app=productpage -o jsonpath='{.items[0].metadata.name}')
+
+# Test communication to details service
+oc exec -n bookinfo-microservices $PRODUCTPAGE_POD -c productpage -- curl -s details:9080/details/0
+
+# Test communication to reviews service
+oc exec -n bookinfo-microservices $PRODUCTPAGE_POD -c productpage -- curl -s reviews:9080/reviews/0
+Task 3: Verify Traffic Routing Through Proxies
+Subtask 3.1: Examine Sidecar Proxy Configuration
+Check the Envoy proxy configuration to understand how traffic is being routed:
+
+# Get detailed information about a pod's sidecar
+PRODUCTPAGE_POD=$(oc get pods -n bookinfo-microservices -l app=productpage -o jsonpath='{.items[0].metadata.name}')
+
+# Check Envoy admin interface
+oc exec -n bookinfo-microservices $PRODUCTPAGE_POD -c istio-proxy -- curl -s localhost:15000/help
+Subtask 3.2: Monitor Traffic with Proxy Logs
+Enable and examine proxy access logs to verify traffic routing:
+
+# Check current proxy logs
+oc logs -n bookinfo-microservices $PRODUCTPAGE_POD -c istio-proxy --tail=10
+
+# Generate some traffic
+for i in {1..5}; do
+  curl -s "http://$INGRESS_HOST/productpage" > /dev/null
+  echo "Request $i sent"
+  sleep 1
+done
+
+# Check proxy logs again to see the traffic
+oc logs -n bookinfo-microservices $PRODUCTPAGE_POD -c istio-proxy --tail=20
+Subtask 3.3: Implement Traffic Splitting
+Create a VirtualService to split traffic between different versions of the reviews service:
+
+# Create traffic splitting rule
+cat << EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews
+  namespace: bookinfo-microservices
+spec:
+  hosts:
+  - reviews
+  http:
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+      weight: 50
+    - destination:
+        host: reviews
+        subset: v2
+      weight: 50
+EOF
+Subtask 3.4: Verify Traffic Splitting
+Test the traffic splitting by making multiple requests and observing different responses:
+
+# Make multiple requests to see traffic splitting
+for i in {1..10}; do
+  echo "Request $i:"
+  curl -s "http://$INGRESS_HOST/productpage" | grep -A 5 -B 5 "reviews"
+  echo "---"
+  sleep 2
+done
+Subtask 3.5: Monitor Service Mesh Metrics
+Check service mesh metrics to verify proxy involvement:
+
+# Check proxy statistics
+oc exec -n bookinfo-microservices $PRODUCTPAGE_POD -c istio-proxy -- curl -s localhost:15000/stats | grep reviews
+
+# Check cluster information
+oc exec -n bookinfo-microservices $PRODUCTPAGE_POD -c istio-proxy -- curl -s localhost:15000/clusters | grep reviews
+Advanced Verification and Monitoring
+Subtask 3.6: Use Kiali for Traffic Visualization
+Access Kiali to visualize service mesh traffic:
+
+# Get Kiali route
+oc get route kiali -n istio-system
+
+# Generate continuous traffic for visualization
+while true; do
+  curl -s "http://$INGRESS_HOST/productpage" > /dev/null
+  sleep 1
+done
+Note: Open Kiali in your browser using the route URL and navigate to the Graph section to see real-time traffic flow between services.
+
+Subtask 3.7: Examine Distributed Tracing
+Check Jaeger for distributed tracing information:
+
+# Get Jaeger route
+oc get route jaeger -n istio-system
+
+# The traces will show the complete request flow through all microservices
+Troubleshooting Common Issues
+Issue 1: Pods Not Getting Sidecar Injection
+Problem: Pods don't have the istio-proxy sidecar container.
+
+Solution:
+
+# Verify namespace labeling
+oc get namespace bookinfo-microservices --show-labels
+
+# Re-label if necessary
+oc label namespace bookinfo-microservices istio-injection=enabled --overwrite
+
+# Restart deployments to trigger injection
+oc rollout restart deployment -n bookinfo-microservices
+Issue 2: Services Not Communicating
+Problem: Services cannot reach each other.
+
+Solution:
+
+# Check service endpoints
+oc get endpoints -n bookinfo-microservices
+
+# Verify DNS resolution
+oc exec -n bookinfo-microservices $PRODUCTPAGE_POD -c productpage -- nslookup reviews
+
+# Check network policies
+oc get networkpolicies -n bookinfo-microservices
+Issue 3: Gateway Not Accessible
+Problem: Cannot access the application through the gateway.
+
+Solution:
+
+# Verify gateway configuration
+oc get gateway -n bookinfo-microservices bookinfo-gateway -o yaml
+
+# Check ingress gateway status
+oc get pods -n istio-system -l app=istio-ingressgateway
+
+# Verify route exists
+oc get route -n istio-system
+Validation Checklist
+Before concluding the lab, verify the following:
+
+ All microservice pods are running with 2/2 containers (app + sidecar)
+ Services can communicate internally through the mesh
+ External access works through the Istio Gateway
+ Traffic splitting is working between reviews v1 and v2
+ Proxy logs show traffic routing information
+ Kiali displays the service topology and traffic flow
+ Jaeger shows distributed traces across services
+Conclusion
+Congratulations! You have successfully completed Lab 4: Deploy a Sample Microservice Application. In this lab, you accomplished several important objectives:
+
+What You Learned
+Microservice Deployment: You deployed a complete microservice application (Bookinfo) consisting of multiple interconnected services on OpenShift.
+
+Service Mesh Integration: You configured OpenShift Service Mesh to manage communication between your microservices, including automatic sidecar injection.
+
+Traffic Management: You implemented advanced traffic routing capabilities including traffic splitting between service versions using VirtualServices and DestinationRules.
+
+Proxy Verification: You verified that all traffic flows through Envoy proxies, providing enhanced security, observability, and traffic management capabilities.
+
+Observability: You learned to monitor service mesh traffic using proxy logs, metrics, and visualization tools like Kiali and Jaeger.
+
+Why This Matters
+This lab demonstrates the real-world benefits of service mesh architecture:
+
+Enhanced Security: All service-to-service communication is automatically secured and can be controlled with fine-grained policies
+Traffic Management: You can implement sophisticated traffic routing, load balancing, and fault injection without changing application code
+Observability: Complete visibility into service interactions, performance metrics, and distributed tracing
+Reliability: Built-in retry logic, circuit breakers, and timeout handling improve application resilience
+Next Steps
+With this foundation, you're ready to explore more advanced service mesh features such as:
+
+Security policies and mutual TLS
+Advanced traffic management patterns
+Fault injection and chaos engineering
+Performance monitoring and optimization
+Multi-cluster service mesh deployments
+The skills you've developed in this lab are directly applicable to production microservice deployments and are essential for modern cloud-native application development.
