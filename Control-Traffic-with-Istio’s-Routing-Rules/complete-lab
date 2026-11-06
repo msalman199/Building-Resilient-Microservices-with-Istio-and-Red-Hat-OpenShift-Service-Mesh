@@ -1,0 +1,546 @@
+Lab 7: Control Traffic with Istio's Routing Rules
+Objectives
+By the end of this lab, you will be able to:
+
+Configure Istio routing rules to control service traffic based on HTTP headers and parameters
+Set up traffic routing based on HTTP headers for intelligent request routing
+Define subsets for version-based routing to manage different service versions
+Test traffic flow between services to validate routing configurations
+Implement advanced traffic management patterns using Istio service mesh
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with YAML configuration files
+Knowledge of HTTP headers and request routing concepts
+Understanding of microservices architecture principles
+Basic command-line interface experience
+Completion of previous Istio labs or equivalent knowledge
+Lab Environment Setup
+Ready-to-Use Cloud Machines: Al Nafi provides Linux-based cloud machines with all necessary tools pre-installed. Simply click Start Lab to begin - no need to build your own VM or install additional software.
+
+Your lab environment includes:
+
+Kubernetes cluster with Istio service mesh installed
+kubectl command-line tool configured
+istioctl command-line tool available
+Sample applications ready for deployment
+Task 1: Set Up Traffic Routing Based on HTTP Headers
+Subtask 1.1: Deploy Sample Applications
+First, we'll deploy multiple versions of a sample application to demonstrate header-based routing.
+
+Create the namespace and enable Istio injection:
+kubectl create namespace traffic-routing
+kubectl label namespace traffic-routing istio-injection=enabled
+Deploy the first version of the application:
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookinfo-reviews-v1
+  namespace: traffic-routing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reviews
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: reviews
+        version: v1
+    spec:
+      containers:
+      - name: reviews
+        image: docker.io/istio/examples-bookinfo-reviews-v1:1.16.2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookinfo-reviews-v2
+  namespace: traffic-routing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reviews
+      version: v2
+  template:
+    metadata:
+      labels:
+        app: reviews
+        version: v2
+    spec:
+      containers:
+      - name: reviews
+        image: docker.io/istio/examples-bookinfo-reviews-v2:1.16.2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reviews
+  namespace: traffic-routing
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: reviews
+EOF
+Deploy a client application for testing:
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sleep
+  namespace: traffic-routing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sleep
+  template:
+    metadata:
+      labels:
+        app: sleep
+    spec:
+      containers:
+      - name: sleep
+        image: curlimages/curl
+        command: ["/bin/sleep", "3650d"]
+        imagePullPolicy: IfNotPresent
+EOF
+Verify all pods are running:
+kubectl get pods -n traffic-routing
+Wait until all pods show Running status before proceeding.
+
+Subtask 1.2: Create Basic Destination Rule
+Define destination rules to identify different versions of the service.
+
+Create the destination rule:
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: reviews-destination
+  namespace: traffic-routing
+spec:
+  host: reviews
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+EOF
+Verify the destination rule is created:
+kubectl get destinationrule -n traffic-routing
+Subtask 1.3: Configure Header-Based Routing
+Now we'll create virtual services to route traffic based on HTTP headers.
+
+Create a virtual service for header-based routing:
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews-header-routing
+  namespace: traffic-routing
+spec:
+  hosts:
+  - reviews
+  http:
+  - match:
+    - headers:
+        user-type:
+          exact: premium
+    route:
+    - destination:
+        host: reviews
+        subset: v2
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+EOF
+This configuration routes requests with the header user-type: premium to version 2, while all other requests go to version 1.
+
+Verify the virtual service is created:
+kubectl get virtualservice -n traffic-routing
+Subtask 1.4: Test Header-Based Routing
+Test the routing configuration to ensure it works correctly.
+
+Get the sleep pod name:
+SLEEP_POD=$(kubectl get pod -l app=sleep -n traffic-routing -o jsonpath='{.items[0].metadata.name}')
+echo "Sleep pod: $SLEEP_POD"
+Test default routing (should go to v1):
+kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s http://reviews:9080/reviews/1
+Look for the response - version 1 typically shows reviews without star ratings.
+
+Test premium user routing (should go to v2):
+kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s -H "user-type: premium" http://reviews:9080/reviews/1
+Version 2 typically shows reviews with black star ratings.
+
+Run multiple tests to verify consistency:
+for i in {1..5}; do
+  echo "Test $i - Default routing:"
+  kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s http://reviews:9080/reviews/1 | grep -o "reviews-v[12]" || echo "No version info found"
+  
+  echo "Test $i - Premium routing:"
+  kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s -H "user-type: premium" http://reviews:9080/reviews/1 | grep -o "reviews-v[12]" || echo "No version info found"
+  echo "---"
+done
+Task 2: Define Subsets for Version-Based Routing
+Subtask 2.1: Deploy Additional Service Versions
+Deploy a third version of the service to demonstrate more complex routing scenarios.
+
+Deploy version 3 of the reviews service:
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookinfo-reviews-v3
+  namespace: traffic-routing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reviews
+      version: v3
+  template:
+    metadata:
+      labels:
+        app: reviews
+        version: v3
+    spec:
+      containers:
+      - name: reviews
+        image: docker.io/istio/examples-bookinfo-reviews-v3:1.16.2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+EOF
+Wait for the new pod to be ready:
+kubectl get pods -n traffic-routing -w
+Press Ctrl+C when all pods are running.
+
+Subtask 2.2: Update Destination Rule with New Subset
+Update the destination rule to include the new version.
+
+Update the destination rule:
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: reviews-destination
+  namespace: traffic-routing
+spec:
+  host: reviews
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+  - name: v3
+    labels:
+      version: v3
+EOF
+Verify the updated destination rule:
+kubectl describe destinationrule reviews-destination -n traffic-routing
+Subtask 2.3: Implement Advanced Routing Rules
+Create more sophisticated routing rules using multiple criteria.
+
+Create an advanced virtual service:
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews-advanced-routing
+  namespace: traffic-routing
+spec:
+  hosts:
+  - reviews
+  http:
+  - match:
+    - headers:
+        user-type:
+          exact: premium
+        user-agent:
+          regex: ".*Chrome.*"
+    route:
+    - destination:
+        host: reviews
+        subset: v3
+  - match:
+    - headers:
+        user-type:
+          exact: premium
+    route:
+    - destination:
+        host: reviews
+        subset: v2
+  - match:
+    - headers:
+        test-user:
+          exact: "true"
+    route:
+    - destination:
+        host: reviews
+        subset: v3
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+EOF
+This configuration implements the following routing logic:
+
+Premium users with Chrome browser → v3
+Other premium users → v2
+Test users → v3
+All other users → v1
+Verify the virtual service:
+kubectl get virtualservice reviews-advanced-routing -n traffic-routing -o yaml
+Subtask 2.4: Test Advanced Routing Scenarios
+Test various routing scenarios to validate the configuration.
+
+Test Chrome premium user (should go to v3):
+kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s \
+  -H "user-type: premium" \
+  -H "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" \
+  http://reviews:9080/reviews/1
+Test Firefox premium user (should go to v2):
+kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s \
+  -H "user-type: premium" \
+  -H "user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0" \
+  http://reviews:9080/reviews/1
+Test user (should go to v3):
+kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s \
+  -H "test-user: true" \
+  http://reviews:9080/reviews/1
+Test regular user (should go to v1):
+kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s \
+  http://reviews:9080/reviews/1
+Task 3: Test Traffic Flow Between Services
+Subtask 3.1: Implement Traffic Splitting
+Configure traffic splitting to distribute load across multiple versions.
+
+Create a traffic splitting virtual service:
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews-traffic-split
+  namespace: traffic-routing
+spec:
+  hosts:
+  - reviews
+  http:
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+      weight: 50
+    - destination:
+        host: reviews
+        subset: v2
+      weight: 30
+    - destination:
+        host: reviews
+        subset: v3
+      weight: 20
+EOF
+This configuration splits traffic: 50% to v1, 30% to v2, and 20% to v3.
+
+Test traffic distribution:
+echo "Testing traffic distribution across versions..."
+for i in {1..20}; do
+  echo -n "Request $i: "
+  kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s http://reviews:9080/reviews/1 | grep -o "reviews-v[123]" || echo "No version detected"
+done
+Subtask 3.2: Monitor Traffic Flow
+Use Istio's observability features to monitor traffic flow.
+
+Check proxy configuration:
+kubectl exec -n traffic-routing $SLEEP_POD -c istio-proxy -- pilot-agent request GET config_dump | grep -A 10 -B 10 "reviews"
+View routing statistics:
+kubectl exec -n traffic-routing $SLEEP_POD -c istio-proxy -- pilot-agent request GET stats | grep reviews
+Check cluster information:
+kubectl exec -n traffic-routing $SLEEP_POD -c istio-proxy -- pilot-agent request GET clusters | grep reviews
+Subtask 3.3: Implement Fault Injection for Testing
+Add fault injection to test service resilience.
+
+Create a virtual service with fault injection:
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews-fault-injection
+  namespace: traffic-routing
+spec:
+  hosts:
+  - reviews
+  http:
+  - match:
+    - headers:
+        test-fault:
+          exact: "delay"
+    fault:
+      delay:
+        percentage:
+          value: 100
+        fixedDelay: 5s
+    route:
+    - destination:
+        host: reviews
+        subset: v1
+  - match:
+    - headers:
+        test-fault:
+          exact: "abort"
+    fault:
+      abort:
+        percentage:
+          value: 100
+        httpStatus: 500
+    route:
+    - destination:
+        host: reviews
+        subset: v1
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+EOF
+Test delay injection:
+echo "Testing delay injection (should take ~5 seconds):"
+time kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s -H "test-fault: delay" http://reviews:9080/reviews/1
+Test abort injection:
+echo "Testing abort injection (should return 500 error):"
+kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s -w "%{http_code}\n" -H "test-fault: abort" http://reviews:9080/reviews/1
+Subtask 3.4: Implement Timeout and Retry Policies
+Configure timeout and retry policies for better resilience.
+
+Create a virtual service with timeout and retry:
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews-resilience
+  namespace: traffic-routing
+spec:
+  hosts:
+  - reviews
+  http:
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+    timeout: 3s
+    retries:
+      attempts: 3
+      perTryTimeout: 1s
+      retryOn: gateway-error,connect-failure,refused-stream
+EOF
+Test the timeout policy:
+echo "Testing timeout policy with a service that might be slow:"
+time kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s -m 10 http://reviews:9080/reviews/1
+Subtask 3.5: Clean Up and Verify Final Configuration
+Clean up test configurations and set a final working configuration.
+
+Apply a clean final configuration:
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews-final
+  namespace: traffic-routing
+spec:
+  hosts:
+  - reviews
+  http:
+  - match:
+    - headers:
+        user-type:
+          exact: premium
+    route:
+    - destination:
+        host: reviews
+        subset: v2
+      weight: 70
+    - destination:
+        host: reviews
+        subset: v3
+      weight: 30
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+EOF
+Final verification test:
+echo "Final verification - Premium users:"
+for i in {1..5}; do
+  kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s -H "user-type: premium" http://reviews:9080/reviews/1 | grep -o "reviews-v[23]" || echo "No version detected"
+done
+
+echo "Final verification - Regular users:"
+for i in {1..5}; do
+  kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- curl -s http://reviews:9080/reviews/1 | grep -o "reviews-v1" || echo "No version detected"
+done
+Troubleshooting Tips
+Common Issues and Solutions
+Issue: Pods not starting or staying in pending state
+
+Solution: Check resource availability with kubectl describe pod <pod-name> -n traffic-routing
+Issue: Routing rules not taking effect
+
+Solution: Verify Istio proxy injection with kubectl get pods -n traffic-routing -o wide and look for 2/2 ready containers
+Issue: Cannot reach services
+
+Solution: Check service endpoints with kubectl get endpoints -n traffic-routing
+Issue: Headers not being recognized
+
+Solution: Ensure header names and values match exactly (case-sensitive)
+Verification Commands
+# Check all Istio configurations
+kubectl get virtualservice,destinationrule -n traffic-routing
+
+# Verify proxy configuration
+kubectl exec -n traffic-routing $SLEEP_POD -c istio-proxy -- pilot-agent request GET config_dump
+
+# Check service connectivity
+kubectl exec -n traffic-routing $SLEEP_POD -c sleep -- nslookup reviews
+Conclusion
+In this lab, you have successfully:
+
+Configured sophisticated traffic routing using Istio's virtual services and destination rules
+Implemented header-based routing to direct traffic based on user characteristics and browser types
+Created and managed service subsets for version-based traffic distribution
+Tested various traffic flow scenarios including traffic splitting, fault injection, and resilience patterns
+Applied advanced routing patterns such as weighted routing, timeouts, and retry policies
+Key Takeaways
+Traffic Control Mastery: You now understand how to use Istio's routing capabilities to implement complex traffic management strategies that are essential for production microservices environments.
+
+Header-Based Intelligence: The ability to route traffic based on HTTP headers enables sophisticated user experience customization, A/B testing, and gradual feature rollouts.
+
+Version Management: Service subsets and version-based routing provide the foundation for blue-green deployments, canary releases, and safe service updates.
+
+Resilience Patterns: Implementing timeouts, retries, and fault injection helps build robust microservices that can handle real-world network conditions and service failures.
+
+Real-World Applications
+These skills are directly applicable to:
+
+Production traffic management in enterprise microservices architectures
+A/B testing and feature flagging for gradual feature rollouts
+Disaster recovery and failover scenarios
+Performance optimization through intelligent load distribution
+Security implementations using header-based access control
+The traffic routing patterns you've learned are fundamental to building resilient, scalable microservices systems using Istio service mesh technology.
