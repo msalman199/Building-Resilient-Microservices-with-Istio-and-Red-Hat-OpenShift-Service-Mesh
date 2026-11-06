@@ -1,0 +1,824 @@
+Lab 8: Implement Canary Releases Using OpenShift Service Mesh
+Objectives
+By the end of this lab, you will be able to:
+
+Deploy new versions of applications alongside existing versions using OpenShift Service Mesh
+Configure traffic splitting between stable and canary versions of an application
+Implement progressive traffic routing strategies for canary releases
+Monitor application health and performance during canary deployments
+Execute rollback procedures when canary versions fail health checks
+Understand the benefits and best practices of canary release patterns
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with OpenShift CLI (oc) commands
+Knowledge of YAML configuration files
+Understanding of microservices architecture principles
+Basic networking concepts and HTTP traffic routing
+Experience with command-line interfaces
+Ready-to-Use Cloud Machines
+Al Nafi provides pre-configured Linux-based cloud machines with all necessary tools installed. Simply click Start Lab to access your environment. No need to build your own VM or install additional software.
+
+Your lab environment includes:
+
+OpenShift cluster with Service Mesh installed
+Pre-configured Istio components
+Sample applications ready for deployment
+Monitoring and observability tools
+Lab Tasks
+Task 1: Set Up a Canary Release Strategy for an Application
+Subtask 1.1: Verify Service Mesh Installation
+First, let's verify that OpenShift Service Mesh is properly installed and running in your cluster.
+
+# Check if Istio system namespace exists
+oc get namespace istio-system
+
+# Verify Istio components are running
+oc get pods -n istio-system
+
+# Check Service Mesh Control Plane status
+oc get smcp -n istio-system
+Subtask 1.2: Create Project and Enable Service Mesh
+Create a new project for your canary deployment and enable it for Service Mesh.
+
+# Create a new project
+oc new-project canary-demo
+
+# Create ServiceMeshMemberRoll to include your project
+cat <<EOF | oc apply -f -
+apiVersion: maistra.io/v1
+kind: ServiceMeshMemberRoll
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  members:
+  - canary-demo
+EOF
+
+# Verify the project is part of the mesh
+oc get smmr -n istio-system -o yaml
+Subtask 1.3: Deploy the Stable Version of the Application
+Deploy the initial stable version of a sample web application.
+
+# Create the stable version deployment
+cat <<EOF | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-v1
+  namespace: canary-demo
+  labels:
+    app: webapp
+    version: v1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: webapp
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: webapp
+        version: v1
+      annotations:
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+      - name: webapp
+        image: nginx:1.20
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html-content
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: html-content
+        configMap:
+          name: webapp-v1-content
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webapp-v1-content
+  namespace: canary-demo
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Web App v1.0</title>
+        <style>
+            body { font-family: Arial, sans-serif; background-color: #e3f2fd; text-align: center; padding: 50px; }
+            .version { color: #1976d2; font-size: 24px; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <h1>Welcome to Web Application</h1>
+        <p class="version">Version: 1.0 (Stable)</p>
+        <p>This is the stable version of the application.</p>
+    </body>
+    </html>
+EOF
+Subtask 1.4: Create Kubernetes Service
+Create a service to expose the application.
+
+# Create service for the webapp
+cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-service
+  namespace: canary-demo
+  labels:
+    app: webapp
+spec:
+  selector:
+    app: webapp
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+EOF
+Subtask 1.5: Deploy the Canary Version
+Now deploy the canary version of the application with different content.
+
+# Create the canary version deployment
+cat <<EOF | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-v2
+  namespace: canary-demo
+  labels:
+    app: webapp
+    version: v2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webapp
+      version: v2
+  template:
+    metadata:
+      labels:
+        app: webapp
+        version: v2
+      annotations:
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+      - name: webapp
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html-content
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: html-content
+        configMap:
+          name: webapp-v2-content
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webapp-v2-content
+  namespace: canary-demo
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Web App v2.0</title>
+        <style>
+            body { font-family: Arial, sans-serif; background-color: #e8f5e8; text-align: center; padding: 50px; }
+            .version { color: #388e3c; font-size: 24px; font-weight: bold; }
+            .new-feature { color: #ff5722; font-style: italic; }
+        </style>
+    </head>
+    <body>
+        <h1>Welcome to Web Application</h1>
+        <p class="version">Version: 2.0 (Canary)</p>
+        <p>This is the new canary version with enhanced features.</p>
+        <p class="new-feature">New Feature: Improved UI and Performance!</p>
+    </body>
+    </html>
+EOF
+Subtask 1.6: Verify Deployments
+Check that both versions are running successfully.
+
+# Check all pods are running
+oc get pods -n canary-demo
+
+# Verify both deployments
+oc get deployments -n canary-demo
+
+# Check service endpoints
+oc get endpoints webapp-service -n canary-demo
+Task 2: Route Traffic to the New Version Incrementally
+Subtask 2.1: Create Istio Gateway
+Create an Istio Gateway to expose the application externally.
+
+# Create Gateway configuration
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: webapp-gateway
+  namespace: canary-demo
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+EOF
+Subtask 2.2: Create Initial VirtualService (100% Stable)
+Start with all traffic going to the stable version.
+
+# Create VirtualService with 100% traffic to v1
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: webapp-vs
+  namespace: canary-demo
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - webapp-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: webapp-service
+        subset: v1
+      weight: 100
+    - destination:
+        host: webapp-service
+        subset: v2
+      weight: 0
+EOF
+Subtask 2.3: Create DestinationRule
+Define subsets for different versions of the application.
+
+# Create DestinationRule to define version subsets
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: webapp-dr
+  namespace: canary-demo
+spec:
+  host: webapp-service
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+EOF
+Subtask 2.4: Get Gateway URL
+Find the external URL to access your application.
+
+# Get the ingress gateway service
+oc get svc istio-ingressgateway -n istio-system
+
+# Get the external IP or hostname
+export GATEWAY_URL=$(oc get route istio-ingressgateway -n istio-system -o jsonpath='{.spec.host}')
+echo "Gateway URL: http://$GATEWAY_URL"
+Subtask 2.5: Test Initial Traffic (100% Stable)
+Test that all traffic goes to the stable version.
+
+# Test multiple requests to verify all go to v1
+for i in {1..10}; do
+  curl -s http://$GATEWAY_URL | grep -o "Version: [0-9.]*"
+  sleep 1
+done
+Subtask 2.6: Implement 10% Canary Traffic
+Update the VirtualService to send 10% of traffic to the canary version.
+
+# Update VirtualService for 10% canary traffic
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: webapp-vs
+  namespace: canary-demo
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - webapp-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: webapp-service
+        subset: v1
+      weight: 90
+    - destination:
+        host: webapp-service
+        subset: v2
+      weight: 10
+EOF
+Subtask 2.7: Test 10% Canary Traffic
+Verify that approximately 10% of requests go to the canary version.
+
+# Test traffic distribution
+echo "Testing 10% canary traffic distribution:"
+for i in {1..20}; do
+  curl -s http://$GATEWAY_URL | grep -o "Version: [0-9.]*"
+  sleep 0.5
+done | sort | uniq -c
+Subtask 2.8: Gradually Increase Canary Traffic
+Progressively increase canary traffic to 50%.
+
+# Update to 50% canary traffic
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: webapp-vs
+  namespace: canary-demo
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - webapp-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: webapp-service
+        subset: v1
+      weight: 50
+    - destination:
+        host: webapp-service
+        subset: v2
+      weight: 50
+EOF
+Subtask 2.9: Test 50% Traffic Split
+Verify the 50/50 traffic distribution.
+
+# Test 50/50 traffic split
+echo "Testing 50% canary traffic distribution:"
+for i in {1..20}; do
+  curl -s http://$GATEWAY_URL | grep -o "Version: [0-9.]*"
+  sleep 0.5
+done | sort | uniq -c
+Task 3: Monitor Canary Version Health and Rollback if Needed
+Subtask 3.1: Install Monitoring Tools
+Set up basic monitoring to observe application metrics.
+
+# Create a simple monitoring script
+cat <<EOF > monitor_canary.sh
+#!/bin/bash
+
+GATEWAY_URL=\$1
+DURATION=\${2:-60}
+INTERVAL=\${3:-2}
+
+if [ -z "\$GATEWAY_URL" ]; then
+    echo "Usage: \$0 <gateway_url> [duration_seconds] [interval_seconds]"
+    exit 1
+fi
+
+echo "Monitoring canary deployment for \$DURATION seconds..."
+echo "Timestamp,Version,Response_Time,Status_Code"
+
+end_time=\$((SECONDS + DURATION))
+
+while [ \$SECONDS -lt \$end_time ]; do
+    timestamp=\$(date '+%Y-%m-%d %H:%M:%S')
+    
+    # Make request and capture metrics
+    response=\$(curl -s -w "%{time_total},%{http_code}" -o /tmp/response.html http://\$GATEWAY_URL)
+    response_time=\$(echo \$response | cut -d',' -f1)
+    status_code=\$(echo \$response | cut -d',' -f2)
+    
+    # Extract version from response
+    version=\$(grep -o "Version: [0-9.]*" /tmp/response.html | cut -d' ' -f2)
+    
+    echo "\$timestamp,\$version,\$response_time,\$status_code"
+    
+    sleep \$INTERVAL
+done
+EOF
+
+chmod +x monitor_canary.sh
+Subtask 3.2: Monitor Application Health
+Start monitoring the application health during canary deployment.
+
+# Start monitoring in background
+./monitor_canary.sh $GATEWAY_URL 120 2 > canary_metrics.csv &
+MONITOR_PID=$!
+
+echo "Monitoring started with PID: $MONITOR_PID"
+echo "Metrics being saved to canary_metrics.csv"
+
+# Let it run for a few seconds, then check initial results
+sleep 10
+echo "Initial monitoring results:"
+tail -5 canary_metrics.csv
+Subtask 3.3: Simulate Application Issues
+Create a problematic version to demonstrate rollback capabilities.
+
+# Create a problematic v3 version
+cat <<EOF | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-v3
+  namespace: canary-demo
+  labels:
+    app: webapp
+    version: v3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webapp
+      version: v3
+  template:
+    metadata:
+      labels:
+        app: webapp
+        version: v3
+      annotations:
+        sidecar.istio.io/inject: "true"
+    spec:
+      containers:
+      - name: webapp
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: html-content
+          mountPath: /usr/share/nginx/html
+        # Simulate high resource usage
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+      volumes:
+      - name: html-content
+        configMap:
+          name: webapp-v3-content
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webapp-v3-content
+  namespace: canary-demo
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Web App v3.0</title>
+        <style>
+            body { font-family: Arial, sans-serif; background-color: #ffebee; text-align: center; padding: 50px; }
+            .version { color: #d32f2f; font-size: 24px; font-weight: bold; }
+            .error { color: #ff1744; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <h1>Welcome to Web Application</h1>
+        <p class="version">Version: 3.0 (Problematic)</p>
+        <p class="error">Warning: This version has known issues!</p>
+        <script>
+            // Simulate slow loading
+            setTimeout(function() {
+                console.log("Slow script execution");
+            }, 2000);
+        </script>
+    </body>
+    </html>
+EOF
+Subtask 3.4: Update DestinationRule for v3
+Add the problematic version to the DestinationRule.
+
+# Update DestinationRule to include v3
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: webapp-dr
+  namespace: canary-demo
+spec:
+  host: webapp-service
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+  - name: v3
+    labels:
+      version: v3
+EOF
+Subtask 3.5: Route Small Traffic to Problematic Version
+Send 5% of traffic to the problematic version.
+
+# Route 5% traffic to problematic v3
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: webapp-vs
+  namespace: canary-demo
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - webapp-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: webapp-service
+        subset: v1
+      weight: 45
+    - destination:
+        host: webapp-service
+        subset: v2
+      weight: 50
+    - destination:
+        host: webapp-service
+        subset: v3
+      weight: 5
+EOF
+Subtask 3.6: Monitor for Issues
+Check the monitoring data for any problems with the new version.
+
+# Check recent monitoring data
+echo "Recent monitoring results:"
+tail -10 canary_metrics.csv
+
+# Check for any error patterns
+echo "Checking for high response times (>1 second):"
+awk -F',' '$3 > 1.0 {print $0}' canary_metrics.csv
+
+# Check for HTTP errors
+echo "Checking for HTTP errors:"
+awk -F',' '$4 != 200 {print $0}' canary_metrics.csv
+Subtask 3.7: Implement Health Checks
+Create health check rules to automatically detect issues.
+
+# Create a health check script
+cat <<EOF > health_check.sh
+#!/bin/bash
+
+GATEWAY_URL=\$1
+THRESHOLD_RESPONSE_TIME=1.0
+ERROR_THRESHOLD=5
+
+if [ -z "\$GATEWAY_URL" ]; then
+    echo "Usage: \$0 <gateway_url>"
+    exit 1
+fi
+
+echo "Performing health check..."
+
+# Test multiple requests
+total_requests=10
+slow_requests=0
+error_requests=0
+
+for i in \$(seq 1 \$total_requests); do
+    response=\$(curl -s -w "%{time_total},%{http_code}" -o /dev/null http://\$GATEWAY_URL)
+    response_time=\$(echo \$response | cut -d',' -f1)
+    status_code=\$(echo \$response | cut -d',' -f2)
+    
+    # Check if response time is too high
+    if (( \$(echo "\$response_time > \$THRESHOLD_RESPONSE_TIME" | bc -l) )); then
+        slow_requests=\$((slow_requests + 1))
+    fi
+    
+    # Check for HTTP errors
+    if [ "\$status_code" != "200" ]; then
+        error_requests=\$((error_requests + 1))
+    fi
+    
+    sleep 0.5
+done
+
+echo "Health Check Results:"
+echo "Total requests: \$total_requests"
+echo "Slow requests (>\${THRESHOLD_RESPONSE_TIME}s): \$slow_requests"
+echo "Error requests: \$error_requests"
+
+# Determine if rollback is needed
+if [ \$slow_requests -gt 2 ] || [ \$error_requests -gt 0 ]; then
+    echo "HEALTH CHECK FAILED - Rollback recommended!"
+    exit 1
+else
+    echo "HEALTH CHECK PASSED - Application is healthy"
+    exit 0
+fi
+EOF
+
+chmod +x health_check.sh
+Subtask 3.8: Execute Health Check
+Run the health check to detect issues.
+
+# Run health check
+./health_check.sh $GATEWAY_URL
+
+# Check the exit code
+if [ $? -eq 1 ]; then
+    echo "Health check failed - proceeding with rollback"
+else
+    echo "Health check passed - canary deployment is healthy"
+fi
+Subtask 3.9: Implement Rollback Strategy
+Create a rollback procedure to quickly revert to stable versions.
+
+# Create rollback script
+cat <<EOF > rollback.sh
+#!/bin/bash
+
+NAMESPACE=\${1:-canary-demo}
+
+echo "Initiating rollback procedure..."
+
+# Step 1: Route all traffic back to stable version (v1)
+echo "Step 1: Routing all traffic to stable version (v1)"
+cat <<ROLLBACK_EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: webapp-vs
+  namespace: \$NAMESPACE
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - webapp-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /
+    route:
+    - destination:
+        host: webapp-service
+        subset: v1
+      weight: 100
+    - destination:
+        host: webapp-service
+        subset: v2
+      weight: 0
+    - destination:
+        host: webapp-service
+        subset: v3
+      weight: 0
+ROLLBACK_EOF
+
+echo "Step 2: Scaling down problematic deployments"
+oc scale deployment webapp-v3 --replicas=0 -n \$NAMESPACE
+
+echo "Step 3: Verifying rollback"
+sleep 5
+for i in {1..5}; do
+    curl -s http://\$GATEWAY_URL | grep -o "Version: [0-9.]*"
+    sleep 1
+done
+
+echo "Rollback completed successfully!"
+EOF
+
+chmod +x rollback.sh
+Subtask 3.10: Execute Rollback
+Perform the rollback to the stable version.
+
+# Execute rollback
+./rollback.sh canary-demo
+
+# Verify all traffic goes to v1
+echo "Verifying rollback - all requests should show v1:"
+for i in {1..10}; do
+  curl -s http://$GATEWAY_URL | grep -o "Version: [0-9.]*"
+  sleep 0.5
+done | sort | uniq -c
+Subtask 3.11: Clean Up Monitoring
+Stop the monitoring process and analyze the collected data.
+
+# Stop monitoring process
+kill $MONITOR_PID 2>/dev/null
+
+# Analyze the collected metrics
+echo "Final analysis of canary deployment:"
+echo "Total requests monitored:"
+wc -l canary_metrics.csv
+
+echo "Version distribution:"
+awk -F',' 'NR>1 {print $2}' canary_metrics.csv | sort | uniq -c
+
+echo "Average response times by version:"
+awk -F',' 'NR>1 {sum[$2]+=$3; count[$2]++} END {for(v in sum) printf "Version %s: %.3f seconds\n", v, sum[v]/count[v]}' canary_metrics.csv
+
+echo "Response time statistics:"
+awk -F',' 'NR>1 {print $3}' canary_metrics.csv | sort -n | awk '
+{
+    times[NR] = $1
+    sum += $1
+}
+END {
+    printf "Min: %.3f seconds\n", times[1]
+    printf "Max: %.3f seconds\n", times[NR]
+    printf "Average: %.3f seconds\n", sum/NR
+    printf "Median: %.3f seconds\n", times[int(NR/2)]
+}'
+Troubleshooting Tips
+Common Issues and Solutions
+Issue 1: Pods not getting Istio sidecar injection
+
+# Check if namespace has sidecar injection enabled
+oc get namespace canary-demo -o yaml | grep istio-injection
+
+# If not enabled, add the annotation
+oc label namespace canary-demo istio-injection=enabled
+Issue 2: Gateway URL not accessible
+
+# Check if ingress gateway is running
+oc get pods -n istio-system | grep ingressgateway
+
+# Check gateway configuration
+oc describe gateway webapp-gateway -n canary-demo
+
+# Verify route exists
+oc get routes -n istio-system
+Issue 3: Traffic not splitting as expected
+
+# Verify DestinationRule subsets
+oc describe destinationrule webapp-dr -n canary-demo
+
+# Check VirtualService configuration
+oc describe virtualservice webapp-vs -n canary-demo
+
+# Verify pod labels match subset selectors
+oc get pods -n canary-demo --show-labels
+Issue 4: Monitoring script not working
+
+# Check if curl is available
+which curl
+
+# Test direct pod access
+oc port-forward svc/webapp-service 8080:80 -n canary-demo
+# Then test: curl localhost:8080
+Conclusion
+Congratulations! You have successfully completed Lab 8 on implementing canary releases using OpenShift Service Mesh. Here's what you accomplished:
+
+Key Achievements
+Deployed Multiple Application Versions: You successfully deployed stable (v1), canary (v2), and problematic (v3) versions of a web application with proper Istio sidecar injection.
+
+Implemented Progressive Traffic Routing: You learned how to use Istio VirtualService and DestinationRule to gradually shift traffic from 100% stable to various percentages of canary traffic (10%, 50%, and 5% for problematic version).
+
+Established Monitoring and Health Checks: You created monitoring scripts to track application performance, response times, and error rates during canary deployments.
+
+Executed Rollback Procedures: You implemented and tested automated rollback strategies to quickly revert to stable versions when issues were detected.
+
+Why This Matters
+Canary releases are crucial for modern application deployment because they:
+
+Reduce Risk: By exposing only a small percentage of users to new versions initially, you minimize the impact of potential issues
+Enable Data-Driven Decisions: Real-world performance data helps determine whether to proceed with or rollback deployments
+Improve User Experience: Users experience fewer disruptions as problems are caught early with limited exposure
+Support Continuous Delivery: Teams can deploy more frequently with confidence, knowing they can quickly rollback if needed
+Real-World Applications
+The techniques you learned apply to:
+
+E-commerce platforms testing new checkout processes
+Financial services deploying critical transaction systems
+Social media applications rolling out new features
+Enterprise software updating business-critical applications
+Next Steps
+To further enhance your canary deployment skills:
+
+Explore automated canary analysis with Flagger or Argo Rollouts
+Integrate with monitoring systems like Prometheus and Grafana
+Implement more sophisticated traffic routing based on user attributes
+Study blue-green deployment patterns as an alternative strategy
+You now have practical experience with one of the most important deployment patterns in modern DevOps, enabling you to deploy applications safely and confidently in production environments.
