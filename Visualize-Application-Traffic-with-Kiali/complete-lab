@@ -1,0 +1,400 @@
+Lab 5: Visualize Application Traffic with Kiali
+Objectives
+By the end of this lab, you will be able to:
+
+Access and navigate the Kiali dashboard interface
+Monitor real-time traffic flow between microservices in a service mesh
+Analyze service communication patterns and dependencies
+Identify performance bottlenecks and error conditions in service interactions
+Interpret Kiali's visualization tools for troubleshooting distributed applications
+Configure traffic monitoring and observability settings
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of microservices architecture
+Familiarity with Kubernetes concepts (pods, services, deployments)
+Knowledge of Istio service mesh fundamentals
+Experience with command-line interface operations
+Understanding of HTTP status codes and network protocols
+Required Knowledge Areas
+Kubernetes: Basic pod and service management
+Istio Service Mesh: Service mesh concepts and components
+Networking: HTTP/HTTPS protocols and status codes
+Linux Command Line: Basic navigation and file operations
+Lab Environment Setup
+Ready-to-Use Cloud Machines
+Al Nafi provides pre-configured Linux-based cloud machines with all necessary tools installed. Simply click Start Lab to access your environment. No need to build your own VM or install software.
+
+Pre-installed Components
+Your lab environment includes:
+
+Kubernetes cluster (v1.28+)
+Istio service mesh (v1.19+)
+Kiali dashboard (v1.73+)
+Sample microservices application
+kubectl command-line tool
+Task 1: Access the Kiali Dashboard
+Subtask 1.1: Verify Istio Installation
+First, let's confirm that Istio and Kiali are properly installed in your cluster.
+
+# Check Istio installation status
+kubectl get pods -n istio-system
+
+# Verify Kiali deployment
+kubectl get deployment kiali -n istio-system
+
+# Check Kiali service status
+kubectl get svc kiali -n istio-system
+Expected Output: You should see all Istio components running, including the Kiali deployment and service.
+
+Subtask 1.2: Access Kiali Dashboard
+Now let's access the Kiali web interface.
+
+# Create port-forward to access Kiali dashboard
+kubectl port-forward svc/kiali 20001:20001 -n istio-system --address 0.0.0.0
+Note: Keep this terminal session open as it maintains the connection to Kiali.
+
+Subtask 1.3: Open Kiali in Browser
+Open a new terminal tab or window
+Access Kiali dashboard at: http://localhost:20001
+If prompted for credentials, use:
+Username: admin
+Password: admin
+Subtask 1.4: Navigate the Kiali Interface
+Once logged in, explore the main sections:
+
+Overview: High-level view of all namespaces
+Graph: Visual representation of service topology
+Applications: Application-centric view
+Workloads: Kubernetes workload information
+Services: Service mesh services overview
+Task 2: Monitor Traffic Between Services
+Subtask 2.1: Deploy Sample Application
+Let's deploy a sample microservices application to generate traffic for monitoring.
+
+# Create a namespace for our sample application
+kubectl create namespace bookinfo
+
+# Label the namespace for Istio injection
+kubectl label namespace bookinfo istio-injection=enabled
+
+# Deploy the Bookinfo sample application
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.19/samples/bookinfo/platform/kube/bookinfo.yaml -n bookinfo
+
+# Verify deployment
+kubectl get pods -n bookinfo
+Wait for all pods to be in Running status before proceeding.
+
+Subtask 2.2: Create Istio Gateway and VirtualService
+# Apply Istio gateway configuration
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.19/samples/bookinfo/networking/bookinfo-gateway.yaml -n bookinfo
+
+# Verify gateway creation
+kubectl get gateway -n bookinfo
+kubectl get virtualservice -n bookinfo
+Subtask 2.3: Generate Application Traffic
+Create a script to generate continuous traffic to our application:
+
+# Create traffic generation script
+cat << 'EOF' > generate_traffic.sh
+#!/bin/bash
+
+# Get the ingress gateway external IP
+INGRESS_HOST=$(kubectl get po -l istio=ingressgateway -n istio-system -o jsonpath='{.items[0].status.hostIP}')
+INGRESS_PORT=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}')
+GATEWAY_URL=$INGRESS_HOST:$INGRESS_PORT
+
+echo "Generating traffic to: http://$GATEWAY_URL/productpage"
+
+# Generate traffic in a loop
+for i in {1..100}; do
+    curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+    echo "Request $i sent"
+    sleep 2
+done
+EOF
+
+# Make script executable
+chmod +x generate_traffic.sh
+
+# Run traffic generation in background
+./generate_traffic.sh &
+Subtask 2.4: View Traffic in Kiali Graph
+Return to the Kiali dashboard in your browser
+Navigate to Graph section
+Select the bookinfo namespace from the dropdown
+Set the time range to Last 1m (1 minute)
+Choose Versioned app graph from the graph type dropdown
+Key Observations:
+
+Green edges: Successful requests
+Red edges: Failed requests
+Edge thickness: Request volume
+Node colors: Service health status
+Subtask 2.5: Analyze Service Dependencies
+In the Graph view, examine the service topology:
+
+# List all services in the bookinfo namespace
+kubectl get services -n bookinfo
+
+# Check service endpoints
+kubectl get endpoints -n bookinfo
+Graph Analysis Points:
+
+productpage → details service calls
+productpage → reviews service calls
+reviews → ratings service calls (for some versions)
+Traffic distribution between different versions
+Task 3: Identify Errors and Bottlenecks
+Subtask 3.1: Introduce Service Errors
+Let's create some errors to observe how Kiali visualizes them:
+
+# Create a destination rule with circuit breaker
+cat << 'EOF' > circuit-breaker.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: reviews-circuit-breaker
+  namespace: bookinfo
+spec:
+  host: reviews
+  trafficPolicy:
+    outlierDetection:
+      consecutiveErrors: 2
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+EOF
+
+kubectl apply -f circuit-breaker.yaml
+Subtask 3.2: Generate Error Traffic
+Create a script to generate some failed requests:
+
+# Create error generation script
+cat << 'EOF' > generate_errors.sh
+#!/bin/bash
+
+INGRESS_HOST=$(kubectl get po -l istio=ingressgateway -n istio-system -o jsonpath='{.items[0].status.hostIP}')
+INGRESS_PORT=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}')
+GATEWAY_URL=$INGRESS_HOST:$INGRESS_PORT
+
+echo "Generating error traffic..."
+
+# Generate mixed success and error traffic
+for i in {1..50}; do
+    # Normal request
+    curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+    
+    # Request to non-existent endpoint (will generate 404)
+    curl -s "http://$GATEWAY_URL/nonexistent" > /dev/null
+    
+    echo "Mixed request $i sent"
+    sleep 1
+done
+EOF
+
+chmod +x generate_errors.sh
+./generate_errors.sh &
+Subtask 3.3: Monitor Errors in Kiali
+Refresh the Kiali Graph view
+Look for red edges indicating failed requests
+Click on the red edges to see error details
+Note the error percentage displayed on connections
+Subtask 3.4: Analyze Performance Metrics
+Navigate to different views in Kiali to analyze performance:
+
+Applications View Analysis
+Go to Applications tab
+Select bookinfo namespace
+Click on productpage application
+Review the Metrics tab for:
+Request rate
+Response time percentiles
+Error rate
+Services View Analysis
+Go to Services tab
+Click on reviews service
+Examine the Metrics section:
+Inbound metrics
+Outbound metrics
+Response time distribution
+Subtask 3.5: Identify Bottlenecks Using Metrics
+Create additional load to identify bottlenecks:
+
+# Create high-load traffic script
+cat << 'EOF' > high_load_traffic.sh
+#!/bin/bash
+
+INGRESS_HOST=$(kubectl get po -l istio=ingressgateway -n istio-system -o jsonpath='{.items[0].status.hostIP}')
+INGRESS_PORT=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}')
+GATEWAY_URL=$INGRESS_HOST:$INGRESS_PORT
+
+echo "Generating high load traffic..."
+
+# Generate concurrent requests
+for i in {1..10}; do
+    (
+        for j in {1..20}; do
+            curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+            sleep 0.1
+        done
+    ) &
+done
+
+wait
+echo "High load traffic generation completed"
+EOF
+
+chmod +x high_load_traffic.sh
+./high_load_traffic.sh
+Subtask 3.6: Advanced Traffic Analysis
+Use Kiali's advanced features to analyze traffic patterns:
+
+Custom Time Ranges
+In the Graph view, set custom time ranges
+Compare traffic patterns over different periods
+Use the Replay feature to see traffic evolution
+Traffic Distribution Analysis
+# Check current traffic distribution
+kubectl get virtualservice -n bookinfo -o yaml
+
+# View destination rules
+kubectl get destinationrule -n bookinfo -o yaml
+Response Time Analysis
+In the Graph view, select Response time from the Display dropdown
+Observe edge labels showing response times
+Identify services with high latency
+Subtask 3.7: Configure Alerts and Thresholds
+Set up monitoring thresholds in Kiali:
+
+Navigate to Graph settings (gear icon)
+Configure traffic rate thresholds:
+Healthy: > 0.1 requests per second
+Degraded: > 20% error rate
+Failure: > 50% error rate
+Task 4: Advanced Kiali Features
+Subtask 4.1: Security Analysis
+Examine security policies and mTLS status:
+
+# Check mTLS policies
+kubectl get peerauthentication -A
+
+# View authorization policies
+kubectl get authorizationpolicy -A
+In Kiali:
+
+Go to Graph view
+Enable Security display option
+Look for lock icons indicating mTLS connections
+Subtask 4.2: Distributed Tracing Integration
+If Jaeger is available, explore distributed tracing:
+
+In the Services view, click on a service
+Navigate to the Traces tab
+Click on individual traces to see detailed spans
+Subtask 4.3: Configuration Validation
+Use Kiali to validate Istio configurations:
+
+Go to Istio Config section
+Look for any warning or error icons
+Click on configurations to see validation details
+# Intentionally create an invalid configuration
+cat << 'EOF' > invalid-config.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: invalid-vs
+  namespace: bookinfo
+spec:
+  hosts:
+  - reviews
+  http:
+  - route:
+    - destination:
+        host: nonexistent-service
+EOF
+
+kubectl apply -f invalid-config.yaml
+
+# Check validation in Kiali
+Troubleshooting Common Issues
+Issue 1: Kiali Dashboard Not Accessible
+Symptoms: Cannot access Kiali at localhost:20001
+
+Solutions:
+
+# Check if port-forward is running
+ps aux | grep "kubectl port-forward"
+
+# Restart port-forward
+kubectl port-forward svc/kiali 20001:20001 -n istio-system --address 0.0.0.0
+
+# Check Kiali pod status
+kubectl get pods -n istio-system | grep kiali
+Issue 2: No Traffic Visible in Graph
+Symptoms: Empty graph or no traffic edges
+
+Solutions:
+
+# Verify application pods are running
+kubectl get pods -n bookinfo
+
+# Check if traffic generation is working
+curl -I http://localhost/productpage
+
+# Verify Istio proxy injection
+kubectl get pods -n bookinfo -o jsonpath='{.items[*].spec.containers[*].name}'
+Issue 3: Services Not Showing Metrics
+Symptoms: Missing metrics in service details
+
+Solutions:
+
+# Check Prometheus connectivity
+kubectl get svc -n istio-system | grep prometheus
+
+# Verify telemetry configuration
+kubectl get telemetry -A
+Lab Cleanup
+When you're finished with the lab, clean up the resources:
+
+# Stop traffic generation
+pkill -f generate_traffic.sh
+pkill -f generate_errors.sh
+pkill -f high_load_traffic.sh
+
+# Delete the bookinfo application
+kubectl delete namespace bookinfo
+
+# Remove configuration files
+rm -f circuit-breaker.yaml invalid-config.yaml
+rm -f generate_traffic.sh generate_errors.sh high_load_traffic.sh high_load_traffic.sh
+
+# Stop port-forward
+pkill -f "kubectl port-forward.*kiali"
+Conclusion
+In this lab, you have successfully:
+
+Accessed and navigated the Kiali dashboard to monitor service mesh traffic
+Visualized service dependencies and communication patterns in a microservices architecture
+Monitored real-time traffic flow between services using Kiali's graph visualization
+Identified and analyzed errors in service communication through visual indicators
+Detected performance bottlenecks using metrics and response time analysis
+Configured traffic monitoring with custom thresholds and alerts
+Explored advanced features including security analysis and configuration validation
+Why This Matters
+Kiali provides crucial observability into service mesh operations, enabling you to:
+
+Quickly identify issues in complex microservices environments
+Understand service dependencies and traffic patterns
+Monitor application health in real-time
+Troubleshoot performance problems efficiently
+Validate security policies and configurations
+These skills are essential for maintaining reliable, observable, and secure microservices architectures in production environments. The visualization capabilities of Kiali make it easier to understand and manage the complexity of modern distributed applications.
+
+Next Steps
+To further develop your service mesh observability skills:
+
+Explore Kiali's integration with other observability tools (Prometheus, Grafana, Jaeger)
+Practice with more complex traffic routing scenarios
+Learn to create custom dashboards and alerts
+Study advanced Istio security and traffic management features
