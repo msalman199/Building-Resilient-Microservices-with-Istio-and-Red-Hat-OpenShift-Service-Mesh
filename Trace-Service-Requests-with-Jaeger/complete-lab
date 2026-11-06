@@ -1,0 +1,292 @@
+Lab 6: Trace Service Requests with Jaeger
+Objectives
+By the end of this lab, you will be able to:
+
+Access and navigate the Jaeger UI to monitor distributed traces
+Track requests as they travel through multiple microservices in a service mesh
+Identify performance bottlenecks, latency issues, and errors in request flows
+Analyze trace data to understand service dependencies and communication patterns
+Use Jaeger's filtering and search capabilities to troubleshoot specific issues
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of microservices architecture
+Familiarity with Kubernetes concepts (pods, services, deployments)
+Knowledge of Istio service mesh fundamentals
+Experience with command-line interface (CLI) operations
+Understanding of HTTP request/response cycles
+Lab Environment Setup
+Ready-to-Use Cloud Machines: Al Nafi provides pre-configured Linux-based cloud machines with all necessary tools installed. Simply click Start Lab to access your environment - no need to build your own VM or install software.
+
+Your lab environment includes:
+
+Kubernetes cluster with Istio service mesh installed
+Jaeger tracing system deployed and configured
+Sample microservices application (Bookinfo) for testing
+kubectl and istioctl command-line tools
+Task 1: Access the Jaeger UI
+Subtask 1.1: Verify Jaeger Installation
+First, let's confirm that Jaeger is properly installed and running in your cluster.
+
+Open your terminal and check the Jaeger pods:
+kubectl get pods -n istio-system | grep jaeger
+Expected output should show Jaeger pods in Running status:
+
+jaeger-5d44bc5c5d-89s2x    1/1     Running   0          2m
+Verify Jaeger service is available:
+kubectl get svc -n istio-system | grep jaeger
+You should see output similar to:
+
+jaeger-query     ClusterIP   10.96.123.45   <none>        16686/TCP   2m
+Subtask 1.2: Access Jaeger UI
+Create a port-forward to access Jaeger UI from your local machine:
+kubectl port-forward -n istio-system svc/jaeger-query 16686:16686 &
+Open your web browser and navigate to:
+http://localhost:16686
+You should see the Jaeger UI homepage with the following sections:
+Service dropdown: Lists all services being traced
+Operation dropdown: Shows operations for selected service
+Tags section: For filtering traces
+Lookback period: Time range for trace search
+Subtask 1.3: Explore Jaeger UI Components
+Take a moment to familiarize yourself with the Jaeger interface:
+
+Search tab: Main interface for finding and filtering traces
+Compare tab: Compare multiple traces side by side
+System Architecture tab: Visual representation of service dependencies
+Monitor tab: Real-time monitoring dashboard
+Task 2: Track Requests Through Microservices
+Subtask 2.1: Deploy Sample Application
+Deploy the Bookinfo sample application to generate trace data:
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/bookinfo/platform/kube/bookinfo.yaml
+Enable Istio sidecar injection for the default namespace:
+kubectl label namespace default istio-injection=enabled
+Verify all pods are running with Istio sidecars:
+kubectl get pods
+You should see 2/2 containers for each pod (application + Istio proxy).
+
+Create an Istio Gateway and VirtualService:
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/bookinfo/networking/bookinfo-gateway.yaml
+Subtask 2.2: Generate Traffic for Tracing
+Get the ingress gateway URL:
+export INGRESS_HOST=$(kubectl get po -l istio=ingressgateway -n istio-system -o jsonpath='{.items[0].status.hostIP}')
+export INGRESS_PORT=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}')
+export GATEWAY_URL=$INGRESS_HOST:$INGRESS_PORT
+Generate multiple requests to create trace data:
+for i in {1..20}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+  echo "Request $i sent"
+  sleep 1
+done
+Generate requests with different user agents to create varied traces:
+curl -H "User-Agent: Mobile-App" "http://$GATEWAY_URL/productpage"
+curl -H "User-Agent: Web-Browser" "http://$GATEWAY_URL/productpage"
+curl -H "User-Agent: API-Client" "http://$GATEWAY_URL/productpage"
+Subtask 2.3: View Traces in Jaeger UI
+Return to the Jaeger UI at http://localhost:16686
+
+In the Service dropdown, select productpage.default
+
+Click Find Traces to see all traces for the productpage service
+
+You should see a list of traces with the following information:
+
+Trace ID: Unique identifier for each request
+Duration: Total time for the request
+Services: Number of services involved
+Spans: Number of operations in the trace
+Click on one of the traces to view detailed information
+
+Subtask 2.4: Analyze Trace Details
+When you click on a trace, you'll see a detailed timeline view showing:
+
+Service calls: Each service involved in the request
+Span duration: Time spent in each service
+Parent-child relationships: How services call each other
+Examine the trace structure for a typical Bookinfo request:
+
+productpage → details (service call)
+productpage → reviews (service call)
+reviews → ratings (conditional service call)
+Click on individual spans to see:
+
+Operation name: Specific operation performed
+Tags: Metadata about the operation
+Logs: Any log messages associated with the span
+Process information: Details about the service instance
+Task 3: Identify Latency and Errors in Request Flow
+Subtask 3.1: Introduce Artificial Delays
+Create a delay in the ratings service to simulate latency issues:
+kubectl apply -f - <<EOF
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: ratings
+spec:
+  hosts:
+  - ratings
+  http:
+  - fault:
+      delay:
+        percentage:
+          value: 50.0
+        fixedDelay: 2s
+    route:
+    - destination:
+        host: ratings
+        subset: v1
+EOF
+Create the required DestinationRule:
+kubectl apply -f - <<EOF
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: ratings
+spec:
+  host: ratings
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+EOF
+Subtask 3.2: Generate Traffic with Delays
+Generate new requests to see the delay effect:
+for i in {1..10}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+  echo "Request $i with potential delay sent"
+  sleep 1
+done
+Subtask 3.3: Analyze Latency in Jaeger
+Return to Jaeger UI and search for new traces
+
+Look for traces with longer durations (should be around 2+ seconds for affected requests)
+
+Click on a slow trace and observe:
+
+The ratings service span shows increased duration
+The delay is clearly visible in the timeline
+Parent spans (reviews, productpage) also show increased total time
+Compare fast and slow traces by:
+
+Opening multiple browser tabs with different traces
+Using the Compare feature in Jaeger
+Noting the difference in span durations
+Subtask 3.4: Introduce HTTP Errors
+Create an HTTP abort fault for the ratings service:
+kubectl apply -f - <<EOF
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: ratings
+spec:
+  hosts:
+  - ratings
+  http:
+  - fault:
+      abort:
+        percentage:
+          value: 30.0
+        httpStatus: 500
+    route:
+    - destination:
+        host: ratings
+        subset: v1
+EOF
+Generate traffic to trigger errors:
+for i in {1..15}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+  echo "Request $i with potential error sent"
+  sleep 1
+done
+Subtask 3.5: Identify Errors in Traces
+In Jaeger UI, look for traces with error indicators:
+
+Red-colored spans indicate errors
+Error tags in span details
+HTTP status codes other than 2xx
+Click on an error trace and examine:
+
+Tags section: Look for http.status_code: 500
+Error tag: error: true
+Logs section: Error messages and stack traces
+Use Jaeger's filtering capabilities:
+
+Add tag filter: error=true
+Filter by minimum duration for slow requests
+Search by specific operation names
+Subtask 3.6: Advanced Trace Analysis
+Use the System Architecture tab to visualize service dependencies:
+
+Click on the System Architecture tab
+Select a time range when you generated traffic
+Observe the service dependency graph
+Analyze service performance metrics:
+
+Note request rates between services
+Identify bottleneck services
+Observe error rates in the dependency graph
+Create custom searches:
+
+Search for traces longer than 1 second: minDuration=1s
+Find traces with specific tags: http.method=GET
+Filter by service: Select specific services from dropdown
+Troubleshooting Common Issues
+Issue 1: No Traces Appearing
+Symptoms: Jaeger UI shows no traces or empty results
+
+Solutions:
+
+Verify Istio proxy injection:
+kubectl get pods -o wide
+Ensure pods show 2/2 containers.
+
+Check if traffic is reaching the services:
+kubectl logs -f deployment/productpage-v1 -c istio-proxy
+Verify Jaeger configuration:
+kubectl get configmap istio -n istio-system -o yaml | grep -A 10 defaultConfig
+Issue 2: Incomplete Traces
+Symptoms: Traces show only some services, missing spans
+
+Solutions:
+
+Check service mesh configuration:
+istioctl proxy-config cluster productpage-v1-xxx.default
+Verify all services have Istio sidecars:
+kubectl get pods --show-labels
+Issue 3: Jaeger UI Not Accessible
+Symptoms: Cannot access Jaeger UI on localhost:16686
+
+Solutions:
+
+Check port-forward process:
+ps aux | grep port-forward
+Restart port-forward:
+pkill -f "port-forward.*jaeger"
+kubectl port-forward -n istio-system svc/jaeger-query 16686:16686 &
+Cleanup
+Remove the fault injection rules:
+kubectl delete virtualservice ratings
+kubectl delete destinationrule ratings
+Stop the port-forward process:
+pkill -f "port-forward.*jaeger"
+Optional - Remove the Bookinfo application:
+kubectl delete -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/bookinfo/platform/kube/bookinfo.yaml
+kubectl delete -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/bookinfo/networking/bookinfo-gateway.yaml
+Conclusion
+In this lab, you successfully learned how to use Jaeger for distributed tracing in a microservices environment. You accomplished the following key tasks:
+
+What You Learned:
+
+Jaeger UI Navigation: You mastered accessing and navigating the Jaeger interface to search, filter, and analyze traces
+Request Tracking: You traced requests as they flowed through multiple microservices, understanding the complete request lifecycle
+Performance Analysis: You identified latency issues by introducing artificial delays and analyzing their impact on service performance
+Error Detection: You learned to spot and investigate errors in distributed systems using trace data
+Advanced Filtering: You used Jaeger's powerful search and filtering capabilities to isolate specific issues
+Why This Matters: Distributed tracing with Jaeger is crucial for modern microservices architectures because it provides:
+
+Visibility: Complete visibility into request flows across complex distributed systems
+Performance Optimization: Ability to identify bottlenecks and optimize service performance
+Debugging: Faster troubleshooting of issues in production environments
+Service Dependencies: Clear understanding of how services interact and depend on each other
+Monitoring: Real-time insights into system health and performance
+These skills are essential for maintaining reliable, high-performance microservices applications and are highly valued in cloud-native development and DevOps roles. The ability to effectively use distributed tracing tools like Jaeger is a key competency for building resilient microservices with Istio and service mesh technologies.
