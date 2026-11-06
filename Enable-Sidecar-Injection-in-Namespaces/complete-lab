@@ -1,0 +1,289 @@
+Lab 3: Enable Sidecar Injection in Namespaces
+Objectives
+By the end of this lab, you will be able to:
+
+Understand the concept of automatic sidecar injection in Istio service mesh
+Label application namespaces to enable service mesh functionality
+Configure automatic sidecar injection for specific namespaces
+Verify that Envoy proxy sidecars are properly injected into application pods
+Troubleshoot common sidecar injection issues
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, namespaces, labels)
+Familiarity with kubectl command-line tool
+Knowledge of YAML configuration files
+Completion of previous Istio installation labs
+Understanding of service mesh architecture concepts
+Required Knowledge Level
+Kubernetes: Intermediate
+Linux Command Line: Intermediate
+YAML: Basic
+Istio Service Mesh: Basic
+Lab Environment Setup
+Good News! Al Nafi provides you with ready-to-use Linux-based cloud machines with all necessary tools pre-installed. Simply click Start Lab to begin - no need to build your own VM or install software.
+
+Your lab environment includes:
+
+Kubernetes cluster with Istio installed
+kubectl configured and ready to use
+All necessary command-line tools
+Sample applications for testing
+Task 1: Label Application Namespaces for Service Mesh
+Subtask 1.1: Create Application Namespaces
+First, let's create the namespaces that will host our applications.
+
+Create a new namespace called bookinfo:
+kubectl create namespace bookinfo
+Create another namespace called sample-app:
+kubectl create namespace sample-app
+Verify the namespaces were created successfully:
+kubectl get namespaces
+You should see both bookinfo and sample-app in the list of namespaces.
+
+Subtask 1.2: Understanding Namespace Labels
+Before we label our namespaces, let's understand what we're doing:
+
+Namespace labels are key-value pairs that provide metadata about namespaces
+Istio uses specific labels to identify which namespaces should have automatic sidecar injection
+The label istio-injection=enabled tells Istio to automatically inject Envoy sidecars into pods
+Subtask 1.3: Label Namespaces for Istio Injection
+Label the bookinfo namespace for automatic sidecar injection:
+kubectl label namespace bookinfo istio-injection=enabled
+Label the sample-app namespace for automatic sidecar injection:
+kubectl label namespace sample-app istio-injection=enabled
+Verify the labels were applied correctly:
+kubectl get namespace bookinfo --show-labels
+kubectl get namespace sample-app --show-labels
+You should see istio-injection=enabled in the labels for both namespaces.
+
+Task 2: Enable Automatic Sidecar Injection for Namespaces
+Subtask 2.1: Understand Sidecar Injection Methods
+Istio provides two methods for sidecar injection:
+
+Automatic Injection: Uses Kubernetes admission controllers to automatically inject sidecars
+Manual Injection: Requires manual modification of deployment YAML files
+We'll focus on automatic injection, which is more convenient for production environments.
+
+Subtask 2.2: Verify Istio Sidecar Injector is Running
+Check if the Istio sidecar injector is running:
+kubectl get pods -n istio-system | grep sidecar-injector
+Verify the sidecar injector webhook configuration:
+kubectl get mutatingwebhookconfiguration istio-sidecar-injector -o yaml
+This webhook automatically modifies pod specifications to include the Envoy sidecar container.
+
+Subtask 2.3: Deploy Sample Applications
+Now let's deploy applications to test automatic sidecar injection.
+
+Create a simple nginx deployment in the bookinfo namespace:
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  namespace: bookinfo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+EOF
+Create a simple httpd deployment in the sample-app namespace:
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpd-deployment
+  namespace: sample-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: httpd
+  template:
+    metadata:
+      labels:
+        app: httpd
+    spec:
+      containers:
+      - name: httpd
+        image: httpd:2.4
+        ports:
+        - containerPort: 80
+EOF
+Wait for deployments to be ready:
+kubectl rollout status deployment/nginx-deployment -n bookinfo
+kubectl rollout status deployment/httpd-deployment -n sample-app
+Task 3: Verify Envoy Proxy Sidecar is Injected in Pods
+Subtask 3.1: Check Pod Container Count
+When sidecar injection is successful, each pod should have two containers instead of one:
+
+The original application container
+The Envoy proxy sidecar container
+Check pods in the bookinfo namespace:
+kubectl get pods -n bookinfo
+Look at the READY column. You should see 2/2 instead of 1/1, indicating two containers per pod.
+
+Check pods in the sample-app namespace:
+kubectl get pods -n sample-app
+Again, you should see 2/2 in the READY column.
+
+Subtask 3.2: Inspect Pod Details
+Get detailed information about a pod in the bookinfo namespace:
+# Get the pod name first
+NGINX_POD=$(kubectl get pods -n bookinfo -l app=nginx -o jsonpath='{.items[0].metadata.name}')
+
+# Describe the pod to see container details
+kubectl describe pod $NGINX_POD -n bookinfo
+Look for the Envoy sidecar container:
+In the output, you should see two containers:
+
+nginx (your application container)
+istio-proxy (the Envoy sidecar container)
+Check container names directly:
+kubectl get pod $NGINX_POD -n bookinfo -o jsonpath='{.spec.containers[*].name}'
+This should output: nginx istio-proxy
+
+Subtask 3.3: Verify Sidecar Injection Annotations
+Check for Istio injection annotations:
+kubectl get pod $NGINX_POD -n bookinfo -o yaml | grep -A 5 -B 5 "sidecar.istio.io"
+You should see annotations like:
+
+sidecar.istio.io/status
+sidecar.istio.io/inject
+Verify the sidecar status annotation:
+kubectl get pod $NGINX_POD -n bookinfo -o jsonpath='{.metadata.annotations.sidecar\.istio\.io/status}'
+This should return a JSON object showing the injected containers and volumes.
+
+Subtask 3.4: Test Sidecar Functionality
+Check if the Envoy admin interface is accessible:
+kubectl exec $NGINX_POD -n bookinfo -c istio-proxy -- curl -s localhost:15000/help
+This should return help information for the Envoy admin interface.
+
+Check Envoy configuration:
+kubectl exec $NGINX_POD -n bookinfo -c istio-proxy -- curl -s localhost:15000/config_dump | head -20
+This shows the Envoy proxy configuration, confirming the sidecar is working.
+
+Subtask 3.5: Compare with Non-Injected Namespace
+To better understand the difference, let's create a pod in a namespace without sidecar injection.
+
+Create a namespace without the injection label:
+kubectl create namespace no-injection
+Deploy a simple pod in this namespace:
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-deployment
+  namespace: no-injection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test
+  template:
+    metadata:
+      labels:
+        app: test
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.21
+        ports:
+        - containerPort: 80
+EOF
+Compare the pod container count:
+kubectl get pods -n no-injection
+You should see 1/1 in the READY column, indicating only one container (no sidecar).
+
+Troubleshooting Common Issues
+Issue 1: Sidecar Not Injected
+Symptoms: Pods show 1/1 instead of 2/2 containers
+
+Solutions:
+
+Verify namespace label:
+kubectl get namespace bookinfo --show-labels
+Check if the label is correct:
+kubectl label namespace bookinfo istio-injection=enabled --overwrite
+Restart the deployment:
+kubectl rollout restart deployment/nginx-deployment -n bookinfo
+Issue 2: Pods Stuck in Pending State
+Symptoms: Pods remain in Pending status
+
+Solutions:
+
+Check pod events:
+kubectl describe pod $NGINX_POD -n bookinfo
+Verify cluster resources:
+kubectl top nodes
+Issue 3: Sidecar Injector Not Working
+Symptoms: No sidecars injected despite correct labels
+
+Solutions:
+
+Check sidecar injector pod status:
+kubectl get pods -n istio-system | grep sidecar-injector
+Verify webhook configuration:
+kubectl get mutatingwebhookconfiguration istio-sidecar-injector
+Verification Checklist
+Before proceeding to the next lab, ensure you have completed:
+
+ Created and labeled namespaces with istio-injection=enabled
+ Deployed applications in the labeled namespaces
+ Verified pods show 2/2 containers (application + sidecar)
+ Confirmed Envoy proxy is running in pods
+ Tested Envoy admin interface accessibility
+ Compared with non-injected namespace to see the difference
+Advanced Configuration (Optional)
+Custom Sidecar Injection Configuration
+You can customize sidecar injection behavior using annotations:
+
+Disable injection for specific pods:
+metadata:
+  annotations:
+    sidecar.istio.io/inject: "false"
+Specify custom sidecar configuration:
+metadata:
+  annotations:
+    sidecar.istio.io/proxyCPU: "100m"
+    sidecar.istio.io/proxyMemory: "128Mi"
+Namespace-Level Injection Policy
+You can also control injection at the namespace level:
+
+kubectl annotate namespace bookinfo sidecar.istio.io/inject=true
+Conclusion
+Congratulations! You have successfully completed Lab 3: Enable Sidecar Injection in Namespaces.
+
+What You Accomplished
+In this lab, you:
+
+Learned about automatic sidecar injection - Understanding how Istio automatically adds Envoy proxy containers to your application pods
+Configured namespace-level injection - Used labels to enable automatic sidecar injection for entire namespaces
+Verified sidecar functionality - Confirmed that Envoy proxies were properly injected and functioning
+Gained troubleshooting skills - Learned how to diagnose and fix common sidecar injection issues
+Why This Matters
+Automatic sidecar injection is crucial for service mesh adoption because it:
+
+Simplifies deployment - No need to manually modify application YAML files
+Ensures consistency - All pods in enabled namespaces automatically get sidecars
+Reduces errors - Eliminates manual configuration mistakes
+Enables service mesh features - Provides the foundation for traffic management, security, and observability
+Next Steps
+With sidecar injection enabled, you're now ready to:
+
+Configure traffic routing and load balancing
+Implement security policies and mutual TLS
+Set up monitoring and distributed tracing
+Explore advanced Istio features like circuit breakers and rate limiting
+The Envoy sidecars you've injected will handle all service mesh functionality transparently to your applications, making your microservices more resilient, secure, and observable.
