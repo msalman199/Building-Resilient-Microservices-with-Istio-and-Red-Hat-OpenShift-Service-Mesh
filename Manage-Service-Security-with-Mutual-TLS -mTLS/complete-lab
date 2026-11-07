@@ -1,0 +1,544 @@
+Lab 13: Manage Service Security with Mutual TLS (mTLS)
+Objectives
+By the end of this lab, you will be able to:
+
+Understand the fundamentals of mutual TLS (mTLS) in service mesh architecture
+Enable and configure mTLS between services in OpenShift Service Mesh
+Implement security policies for service-to-service communication
+Test and verify secure communication between microservices
+Troubleshoot common mTLS configuration issues
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes and OpenShift concepts
+Familiarity with service mesh architecture and Istio fundamentals
+Knowledge of TLS/SSL certificates and PKI concepts
+Experience with YAML configuration files
+Understanding of microservices communication patterns
+Required Knowledge Areas
+OpenShift Service Mesh: Basic installation and configuration
+Istio Components: Understanding of Envoy proxy, Pilot, and Citadel
+Network Security: Basic concepts of encryption and authentication
+Command Line Tools: Comfort with kubectl and oc commands
+Lab Environment Setup
+Good News! Al Nafi provides ready-to-use Linux-based cloud machines for this lab. Simply click Start Lab to access your pre-configured environment. No need to build your own VM or install software.
+
+Your lab environment includes:
+
+OpenShift cluster with Service Mesh installed
+Sample microservices applications
+All necessary CLI tools (oc, kubectl, istioctl)
+Pre-configured certificates and keys
+Task 1: Enable mTLS Between Services
+Subtask 1.1: Verify Service Mesh Installation
+First, let's verify that OpenShift Service Mesh is properly installed and running.
+
+Check Service Mesh Control Plane Status
+# Verify the Service Mesh control plane is running
+oc get smcp -n istio-system
+
+# Check all Service Mesh components
+oc get pods -n istio-system
+Verify Istio Configuration
+# Check Istio version and configuration
+istioctl version
+
+# Verify proxy configuration
+istioctl proxy-config cluster -n bookinfo
+Subtask 1.2: Deploy Sample Applications
+We'll use a sample bookinfo application to demonstrate mTLS configuration.
+
+Create Application Namespace
+# Create a new namespace for our application
+oc new-project bookinfo-mtls
+
+# Label the namespace for automatic sidecar injection
+oc label namespace bookinfo-mtls istio-injection=enabled
+Deploy Sample Applications
+# Deploy the bookinfo application
+cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: productpage
+  namespace: bookinfo-mtls
+  labels:
+    app: productpage
+    service: productpage
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: productpage
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-productpage
+  namespace: bookinfo-mtls
+  labels:
+    account: productpage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: productpage-v1
+  namespace: bookinfo-mtls
+  labels:
+    app: productpage
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: productpage
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: productpage
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-productpage
+      containers:
+      - name: productpage
+        image: docker.io/istio/examples-bookinfo-productpage-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        securityContext:
+          runAsUser: 1000
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: details
+  namespace: bookinfo-mtls
+  labels:
+    app: details
+    service: details
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: details
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-details
+  namespace: bookinfo-mtls
+  labels:
+    account: details
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: details-v1
+  namespace: bookinfo-mtls
+  labels:
+    app: details
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: details
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: details
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-details
+      containers:
+      - name: details
+        image: docker.io/istio/examples-bookinfo-details-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        securityContext:
+          runAsUser: 1000
+EOF
+Verify Application Deployment
+# Check if pods are running with sidecars
+oc get pods -n bookinfo-mtls
+
+# Verify sidecar injection
+oc describe pod -l app=productpage -n bookinfo-mtls | grep -i containers -A 10
+Subtask 1.3: Configure Automatic mTLS
+Create PeerAuthentication Policy
+# Create a PeerAuthentication policy to enforce mTLS
+cat <<EOF | oc apply -f -
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: bookinfo-mtls
+spec:
+  mtls:
+    mode: STRICT
+EOF
+Verify mTLS Configuration
+# Check the PeerAuthentication policy
+oc get peerauthentication -n bookinfo-mtls
+
+# Verify mTLS status using istioctl
+istioctl authn tls-check productpage-v1-<pod-suffix>.bookinfo-mtls details.bookinfo-mtls.svc.cluster.local
+Note: Replace <pod-suffix> with the actual pod suffix from your deployment.
+
+Subtask 1.4: Test Basic mTLS Communication
+Create a Test Pod
+# Deploy a test pod to verify communication
+cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sleep
+  namespace: bookinfo-mtls
+  labels:
+    app: sleep
+spec:
+  containers:
+  - name: sleep
+    image: curlimages/curl
+    command: ["/bin/sleep", "3650d"]
+    imagePullPolicy: IfNotPresent
+    volumeMounts:
+    - mountPath: /etc/sleep/tls
+      name: secret-volume
+  volumes:
+  - name: secret-volume
+    emptyDir: {}
+EOF
+Test Service Communication
+# Test communication between services
+oc exec -n bookinfo-mtls sleep -- curl -s http://productpage:9080/health
+
+# Test communication to details service
+oc exec -n bookinfo-mtls sleep -- curl -s http://details:9080/details/1
+Task 2: Configure Security Policies for Service Communication
+Subtask 2.1: Create Destination Rules for mTLS
+Configure Destination Rules
+# Create destination rules to specify mTLS settings
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: productpage
+  namespace: bookinfo-mtls
+spec:
+  host: productpage
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: details
+  namespace: bookinfo-mtls
+spec:
+  host: details
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL
+EOF
+Verify Destination Rules
+# Check destination rules
+oc get destinationrule -n bookinfo-mtls
+
+# Describe the destination rule configuration
+oc describe destinationrule productpage -n bookinfo-mtls
+Subtask 2.2: Implement Authorization Policies
+Create Authorization Policies
+# Create an authorization policy to control access
+cat <<EOF | oc apply -f -
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: productpage-viewer
+  namespace: bookinfo-mtls
+spec:
+  selector:
+    matchLabels:
+      app: productpage
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/bookinfo-mtls/sa/bookinfo-productpage"]
+  - to:
+    - operation:
+        methods: ["GET"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: details-viewer
+  namespace: bookinfo-mtls
+spec:
+  selector:
+    matchLabels:
+      app: details
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/bookinfo-mtls/sa/bookinfo-productpage"]
+  - to:
+    - operation:
+        methods: ["GET"]
+EOF
+Verify Authorization Policies
+# Check authorization policies
+oc get authorizationpolicy -n bookinfo-mtls
+
+# Describe the authorization policy
+oc describe authorizationpolicy productpage-viewer -n bookinfo-mtls
+Subtask 2.3: Configure Service-Specific mTLS Settings
+Create Service-Specific PeerAuthentication
+# Create specific mTLS settings for the details service
+cat <<EOF | oc apply -f -
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: details-mtls
+  namespace: bookinfo-mtls
+spec:
+  selector:
+    matchLabels:
+      app: details
+  mtls:
+    mode: STRICT
+  portLevelMtls:
+    9080:
+      mode: STRICT
+EOF
+Create Workload-Specific Policies
+# Create workload-specific authentication policy
+cat <<EOF | oc apply -f -
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: productpage-mtls
+  namespace: bookinfo-mtls
+spec:
+  selector:
+    matchLabels:
+      app: productpage
+      version: v1
+  mtls:
+    mode: STRICT
+EOF
+Task 3: Test Service Communication Security
+Subtask 3.1: Verify mTLS Certificate Exchange
+Check Certificate Information
+# Get the productpage pod name
+PRODUCTPAGE_POD=$(oc get pod -l app=productpage -n bookinfo-mtls -o jsonpath='{.items[0].metadata.name}')
+
+# Check certificate details
+istioctl proxy-config secret $PRODUCTPAGE_POD -n bookinfo-mtls
+Verify Certificate Rotation
+# Check certificate expiration and rotation
+oc exec -n bookinfo-mtls $PRODUCTPAGE_POD -c istio-proxy -- openssl s_client -connect details:9080 -cert /etc/ssl/certs/cert-chain.pem -key /etc/ssl/private/key.pem -CAfile /etc/ssl/certs/root-cert.pem
+Subtask 3.2: Test Communication Security
+Test Authorized Communication
+# Test communication from productpage to details (should work)
+PRODUCTPAGE_POD=$(oc get pod -l app=productpage -n bookinfo-mtls -o jsonpath='{.items[0].metadata.name}')
+
+oc exec -n bookinfo-mtls $PRODUCTPAGE_POD -c productpage -- curl -s http://details:9080/details/1
+Test Unauthorized Communication
+# Create a pod without proper service account
+cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unauthorized-client
+  namespace: bookinfo-mtls
+  labels:
+    app: unauthorized
+spec:
+  containers:
+  - name: client
+    image: curlimages/curl
+    command: ["/bin/sleep", "3650d"]
+    imagePullPolicy: IfNotPresent
+EOF
+# Test communication from unauthorized pod (should fail)
+oc exec -n bookinfo-mtls unauthorized-client -- curl -s http://details:9080/details/1 -v
+Subtask 3.3: Monitor and Analyze mTLS Traffic
+Check mTLS Status with Kiali
+# Get Kiali route (if available)
+oc get route kiali -n istio-system
+
+# Alternative: Use port-forward to access Kiali
+oc port-forward svc/kiali 20001:20001 -n istio-system
+Analyze Traffic with Istioctl
+# Check proxy configuration for mTLS
+istioctl proxy-config cluster $PRODUCTPAGE_POD -n bookinfo-mtls
+
+# Verify listener configuration
+istioctl proxy-config listener $PRODUCTPAGE_POD -n bookinfo-mtls
+Monitor Certificate Status
+# Check certificate status across all workloads
+istioctl authn tls-check -n bookinfo-mtls
+
+# Get detailed certificate information
+for pod in $(oc get pods -n bookinfo-mtls -o jsonpath='{.items[*].metadata.name}'); do
+  echo "=== Certificate info for $pod ==="
+  istioctl proxy-config secret $pod -n bookinfo-mtls
+done
+Subtask 3.4: Test mTLS Policy Enforcement
+Create Test Scenarios
+# Test 1: Disable mTLS temporarily and verify failure
+cat <<EOF | oc apply -f -
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: disable-mtls-test
+  namespace: bookinfo-mtls
+spec:
+  selector:
+    matchLabels:
+      app: details
+  mtls:
+    mode: DISABLE
+EOF
+Verify Policy Changes
+# Wait for policy to take effect
+sleep 30
+
+# Test communication (should still work but without mTLS)
+oc exec -n bookinfo-mtls $PRODUCTPAGE_POD -c productpage -- curl -s http://details:9080/details/1
+
+# Check mTLS status
+istioctl authn tls-check $PRODUCTPAGE_POD.bookinfo-mtls details.bookinfo-mtls.svc.cluster.local
+Restore Strict mTLS
+# Remove the disable policy
+oc delete peerauthentication disable-mtls-test -n bookinfo-mtls
+
+# Verify mTLS is restored
+sleep 30
+istioctl authn tls-check $PRODUCTPAGE_POD.bookinfo-mtls details.bookinfo-mtls.svc.cluster.local
+Troubleshooting Common Issues
+Issue 1: mTLS Not Working
+Symptoms: Services cannot communicate, connection refused errors
+
+Solutions:
+
+# Check if sidecars are properly injected
+oc get pods -n bookinfo-mtls -o jsonpath='{.items[*].spec.containers[*].name}'
+
+# Verify PeerAuthentication policies
+oc get peerauthentication -n bookinfo-mtls -o yaml
+
+# Check destination rules
+oc get destinationrule -n bookinfo-mtls -o yaml
+Issue 2: Certificate Issues
+Symptoms: TLS handshake failures, certificate validation errors
+
+Solutions:
+
+# Check certificate status
+istioctl proxy-config secret -n bookinfo-mtls
+
+# Verify certificate chain
+oc exec -n bookinfo-mtls $PRODUCTPAGE_POD -c istio-proxy -- ls -la /etc/ssl/certs/
+
+# Check certificate expiration
+istioctl proxy-config secret $PRODUCTPAGE_POD -n bookinfo-mtls | grep EXPIRE
+Issue 3: Authorization Policy Conflicts
+Symptoms: Unexpected access denials or permissions
+
+Solutions:
+
+# List all authorization policies
+oc get authorizationpolicy -n bookinfo-mtls
+
+# Check policy details
+oc describe authorizationpolicy -n bookinfo-mtls
+
+# Verify service account principals
+oc get serviceaccount -n bookinfo-mtls
+Verification and Testing Commands
+Use these commands to verify your mTLS configuration:
+
+# Complete verification script
+#!/bin/bash
+
+echo "=== Verifying mTLS Configuration ==="
+
+# 1. Check Service Mesh components
+echo "1. Checking Service Mesh components..."
+oc get pods -n istio-system | grep -E "(istiod|istio-proxy)"
+
+# 2. Verify application pods with sidecars
+echo "2. Verifying application pods..."
+oc get pods -n bookinfo-mtls
+
+# 3. Check mTLS policies
+echo "3. Checking mTLS policies..."
+oc get peerauthentication -n bookinfo-mtls
+
+# 4. Verify destination rules
+echo "4. Checking destination rules..."
+oc get destinationrule -n bookinfo-mtls
+
+# 5. Test mTLS communication
+echo "5. Testing mTLS communication..."
+PRODUCTPAGE_POD=$(oc get pod -l app=productpage -n bookinfo-mtls -o jsonpath='{.items[0].metadata.name}')
+oc exec -n bookinfo-mtls $PRODUCTPAGE_POD -c productpage -- curl -s -o /dev/null -w "%{http_code}" http://details:9080/details/1
+
+# 6. Check certificate status
+echo "6. Checking certificate status..."
+istioctl authn tls-check -n bookinfo-mtls
+
+echo "=== Verification Complete ==="
+Cleanup
+To clean up the lab environment:
+
+# Delete the bookinfo-mtls namespace
+oc delete project bookinfo-mtls
+
+# Verify cleanup
+oc get projects | grep bookinfo-mtls
+Conclusion
+Congratulations! You have successfully completed Lab 13 on managing service security with mutual TLS (mTLS). Here's what you accomplished:
+
+Key Achievements
+Enabled mTLS Between Services: You configured automatic mutual TLS authentication between microservices, ensuring encrypted and authenticated communication.
+
+Implemented Security Policies: You created comprehensive security policies including PeerAuthentication, DestinationRules, and AuthorizationPolicies to control service-to-service communication.
+
+Tested Security Configuration: You verified that mTLS is working correctly and tested both authorized and unauthorized communication scenarios.
+
+Why This Matters
+Security: mTLS provides strong authentication and encryption for service-to-service communication, protecting against man-in-the-middle attacks and ensuring data confidentiality.
+
+Zero Trust Architecture: By implementing mTLS, you've established a foundation for zero trust networking where every service must authenticate before communicating.
+
+Compliance: Many regulatory frameworks require encrypted communication between services, and mTLS helps meet these requirements.
+
+Operational Benefits: Automatic certificate management and rotation reduce operational overhead while maintaining high security standards.
+
+Real-World Applications
+Financial Services: Banks use mTLS to secure communication between payment processing services
+Healthcare: Medical systems require mTLS for HIPAA compliance when handling patient data
+E-commerce: Online retailers protect customer data and payment information with service mesh security
+Government: Public sector applications use mTLS for classified and sensitive data protection
+Next Steps
+To further enhance your service mesh security knowledge:
+
+Explore advanced authorization policies with custom attributes
+Learn about external certificate management integration
+Study service mesh observability and security monitoring
+Practice with multi-cluster mTLS configurations
+You now have the skills to implement enterprise-grade service security using mutual TLS in OpenShift Service Mesh, making you valuable for organizations adopting microservices architectures with strong security requirements.
