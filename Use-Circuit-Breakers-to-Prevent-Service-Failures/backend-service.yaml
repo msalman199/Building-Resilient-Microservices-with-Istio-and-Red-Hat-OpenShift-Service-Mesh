@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: circuit-breaker-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+        version: v1
+    spec:
+      containers:
+      - name: backend
+        image: kennethreitz/httpbin
+        ports:
+        - containerPort: 80
+        env:
+        - name: DELAY_RESPONSE
+          value: "false"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: circuit-breaker-demo
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http

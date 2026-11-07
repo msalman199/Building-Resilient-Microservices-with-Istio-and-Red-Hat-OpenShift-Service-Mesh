@@ -1,0 +1,642 @@
+Lab 11: Use Circuit Breakers to Prevent Service Failures
+Objectives
+By the end of this lab, students will be able to:
+
+Understand the concept of circuit breakers in microservices architecture
+Implement circuit breakers using Istio service mesh to prevent cascading failures
+Configure and deploy circuit breaker policies for microservices
+Simulate service failures and observe circuit breaker behavior
+Monitor circuit breaker metrics and actions in real-time
+Fine-tune circuit breaker thresholds for optimal performance
+Analyze the impact of circuit breakers on system resilience
+Prerequisites
+Before starting this lab, students should have:
+
+Basic understanding of microservices architecture
+Familiarity with Kubernetes concepts (pods, services, deployments)
+Knowledge of YAML configuration files
+Understanding of HTTP status codes and network concepts
+Basic command-line interface experience
+Completed previous labs on Istio service mesh fundamentals
+Required Knowledge Areas
+Circuit Breaker Pattern: Understanding of how circuit breakers work in distributed systems
+Istio Service Mesh: Basic knowledge of Istio components and configuration
+Kubernetes: Pod management, service discovery, and networking
+Load Testing: Basic concepts of generating traffic for testing
+Lab Environment Setup
+Good News: Al Nafi provides ready-to-use Linux-based cloud machines with all necessary tools pre-installed. Simply click Start Lab to begin - no need to build your own VM or install software.
+
+Pre-installed Tools
+Your cloud machine includes:
+
+Kubernetes cluster (minikube or kind)
+Istio service mesh
+kubectl command-line tool
+curl for testing HTTP requests
+hey load testing tool
+Prometheus and Grafana for monitoring
+Task 1: Configure Circuit Breakers for Services
+Subtask 1.1: Deploy Sample Microservices
+First, let's deploy a simple microservices application that we'll use to demonstrate circuit breaker functionality.
+
+Step 1: Create the Application Namespace
+kubectl create namespace circuit-breaker-demo
+kubectl label namespace circuit-breaker-demo istio-injection=enabled
+Step 2: Deploy the Frontend Service
+Create the frontend service configuration:
+
+cat <<EOF > frontend-service.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: circuit-breaker-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+        version: v1
+    spec:
+      containers:
+      - name: frontend
+        image: kennethreitz/httpbin
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: circuit-breaker-demo
+spec:
+  selector:
+    app: frontend
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+EOF
+Apply the configuration:
+
+kubectl apply -f frontend-service.yaml
+Step 3: Deploy the Backend Service
+Create the backend service that we'll apply circuit breaker policies to:
+
+cat <<EOF > backend-service.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: circuit-breaker-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+        version: v1
+    spec:
+      containers:
+      - name: backend
+        image: kennethreitz/httpbin
+        ports:
+        - containerPort: 80
+        env:
+        - name: DELAY_RESPONSE
+          value: "false"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: circuit-breaker-demo
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 80
+    name: http
+EOF
+Apply the backend configuration:
+
+kubectl apply -f backend-service.yaml
+Step 4: Verify Service Deployment
+Check that all services are running:
+
+kubectl get pods -n circuit-breaker-demo
+kubectl get services -n circuit-breaker-demo
+Wait until all pods show Running status before proceeding.
+
+Subtask 1.2: Create Circuit Breaker Destination Rule
+Now we'll configure the circuit breaker policy using Istio's DestinationRule.
+
+Step 1: Create Basic Circuit Breaker Configuration
+cat <<EOF > circuit-breaker-destinationrule.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: backend-circuit-breaker
+  namespace: circuit-breaker-demo
+spec:
+  host: backend.circuit-breaker-demo.svc.cluster.local
+  trafficPolicy:
+    outlierDetection:
+      consecutiveGatewayErrors: 3
+      consecutive5xxErrors: 3
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+    connectionPool:
+      tcp:
+        maxConnections: 10
+      http:
+        http1MaxPendingRequests: 5
+        http2MaxRequests: 10
+        maxRequestsPerConnection: 2
+        maxRetries: 3
+        consecutiveGatewayErrors: 3
+        h2UpgradePolicy: UPGRADE
+EOF
+Step 2: Apply the Circuit Breaker Configuration
+kubectl apply -f circuit-breaker-destinationrule.yaml
+Step 3: Verify the Configuration
+kubectl get destinationrule -n circuit-breaker-demo
+kubectl describe destinationrule backend-circuit-breaker -n circuit-breaker-demo
+Subtask 1.3: Configure Virtual Service for Traffic Routing
+Create a Virtual Service to route traffic to our backend service:
+
+cat <<EOF > backend-virtualservice.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: backend-vs
+  namespace: circuit-breaker-demo
+spec:
+  hosts:
+  - backend.circuit-breaker-demo.svc.cluster.local
+  http:
+  - match:
+    - uri:
+        prefix: "/"
+    route:
+    - destination:
+        host: backend.circuit-breaker-demo.svc.cluster.local
+        port:
+          number: 80
+    timeout: 10s
+    retries:
+      attempts: 3
+      perTryTimeout: 3s
+EOF
+Apply the Virtual Service:
+
+kubectl apply -f backend-virtualservice.yaml
+Task 2: Simulate Failures and Monitor Circuit Breaker Actions
+Subtask 2.1: Set Up Monitoring and Observability
+Step 1: Deploy a Test Client Pod
+Create a test client to generate traffic:
+
+cat <<EOF > test-client.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client
+  namespace: circuit-breaker-demo
+spec:
+  containers:
+  - name: test-client
+    image: curlimages/curl:latest
+    command: ["/bin/sh"]
+    args: ["-c", "sleep 3600"]
+EOF
+kubectl apply -f test-client.yaml
+Step 2: Verify Baseline Connectivity
+Test normal connectivity to the backend service:
+
+kubectl exec -it test-client -n circuit-breaker-demo -- curl -s http://backend/status/200
+You should see a successful HTTP 200 response.
+
+Subtask 2.2: Generate Normal Traffic Load
+Step 1: Create a Simple Load Test Script
+cat <<EOF > load-test.sh
+#!/bin/bash
+echo "Starting normal load test..."
+for i in {1..50}; do
+  kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code} " http://backend/status/200
+  sleep 0.1
+done
+echo ""
+echo "Normal load test completed"
+EOF
+Make the script executable and run it:
+
+chmod +x load-test.sh
+./load-test.sh
+You should see mostly 200 status codes, indicating successful requests.
+
+Subtask 2.3: Simulate Service Failures
+Step 1: Introduce 500 Errors
+Test the circuit breaker by generating 500 errors:
+
+cat <<EOF > failure-test.sh
+#!/bin/bash
+echo "Testing circuit breaker with 500 errors..."
+for i in {1..20}; do
+  response=\$(kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code}" http://backend/status/500)
+  echo "Request \$i: HTTP \$response"
+  sleep 0.5
+done
+EOF
+chmod +x failure-test.sh
+./failure-test.sh
+Step 2: Observe Circuit Breaker Activation
+After several 500 errors, you should start seeing 503 status codes, indicating the circuit breaker has opened.
+
+Step 3: Test High Connection Load
+Create a script to test connection pool limits:
+
+cat <<EOF > connection-test.sh
+#!/bin/bash
+echo "Testing connection pool limits..."
+for i in {1..15}; do
+  kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code} " http://backend/delay/2 &
+done
+wait
+echo ""
+echo "Connection test completed"
+EOF
+chmod +x connection-test.sh
+./connection-test.sh
+Subtask 2.4: Monitor Circuit Breaker Metrics
+Step 1: Check Istio Proxy Statistics
+View circuit breaker statistics from the Envoy proxy:
+
+# Get the backend pod name
+BACKEND_POD=$(kubectl get pods -n circuit-breaker-demo -l app=backend -o jsonpath='{.items[0].metadata.name}')
+
+# Check Envoy admin interface for circuit breaker stats
+kubectl exec -n circuit-breaker-demo $BACKEND_POD -c istio-proxy -- curl -s localhost:15000/stats | grep circuit_breaker
+Step 2: View Outlier Detection Statistics
+kubectl exec -n circuit-breaker-demo $BACKEND_POD -c istio-proxy -- curl -s localhost:15000/stats | grep outlier_detection
+Step 3: Check Connection Pool Statistics
+kubectl exec -n circuit-breaker-demo $BACKEND_POD -c istio-proxy -- curl -s localhost:15000/stats | grep upstream_rq_pending
+Task 3: Fine-tune Thresholds for Breaking the Circuit
+Subtask 3.1: Analyze Current Circuit Breaker Performance
+Step 1: Document Current Behavior
+Create a comprehensive test to understand current thresholds:
+
+cat <<EOF > comprehensive-test.sh
+#!/bin/bash
+echo "=== Comprehensive Circuit Breaker Test ==="
+echo "Testing current configuration..."
+
+echo "1. Testing consecutive errors threshold..."
+for i in {1..5}; do
+  response=\$(kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code}" http://backend/status/500)
+  echo "Error test \$i: HTTP \$response"
+  sleep 1
+done
+
+echo ""
+echo "2. Testing recovery after errors..."
+sleep 35  # Wait for ejection time
+for i in {1..3}; do
+  response=\$(kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code}" http://backend/status/200)
+  echo "Recovery test \$i: HTTP \$response"
+  sleep 1
+done
+
+echo ""
+echo "3. Testing connection limits..."
+for i in {1..12}; do
+  kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code} " http://backend/delay/1 &
+done
+wait
+echo ""
+echo "Comprehensive test completed"
+EOF
+chmod +x comprehensive-test.sh
+./comprehensive-test.sh
+Subtask 3.2: Create Optimized Circuit Breaker Configuration
+Based on the test results, let's create a more finely-tuned configuration:
+
+Step 1: Create Enhanced Circuit Breaker Configuration
+cat <<EOF > optimized-circuit-breaker.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: backend-circuit-breaker-optimized
+  namespace: circuit-breaker-demo
+spec:
+  host: backend.circuit-breaker-demo.svc.cluster.local
+  trafficPolicy:
+    outlierDetection:
+      # Reduce consecutive errors for faster detection
+      consecutiveGatewayErrors: 2
+      consecutive5xxErrors: 2
+      # Check more frequently
+      interval: 10s
+      # Shorter ejection time for faster recovery
+      baseEjectionTime: 15s
+      # Allow higher ejection percentage
+      maxEjectionPercent: 75
+      # Require at least one healthy instance
+      minHealthPercent: 25
+      # Split window for better detection
+      splitExternalLocalOriginErrors: true
+    connectionPool:
+      tcp:
+        # Increase max connections for higher throughput
+        maxConnections: 20
+        # Add connection timeout
+        connectTimeout: 5s
+      http:
+        # Increase pending requests
+        http1MaxPendingRequests: 10
+        # Increase concurrent requests
+        http2MaxRequests: 20
+        # Allow more requests per connection
+        maxRequestsPerConnection: 5
+        # Reduce retries to fail faster
+        maxRetries: 2
+        # Add request timeout
+        h2UpgradePolicy: UPGRADE
+        # Enable keep-alive
+        useClientProtocol: true
+EOF
+Step 2: Apply the Optimized Configuration
+First, remove the old configuration:
+
+kubectl delete destinationrule backend-circuit-breaker -n circuit-breaker-demo
+Apply the new configuration:
+
+kubectl apply -f optimized-circuit-breaker.yaml
+Subtask 3.3: Test the Optimized Configuration
+Step 1: Create Advanced Test Scenarios
+cat <<EOF > advanced-test.sh
+#!/bin/bash
+echo "=== Advanced Circuit Breaker Testing ==="
+
+echo "Test 1: Fast failure detection (2 consecutive errors)"
+for i in {1..4}; do
+  response=\$(kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code}" http://backend/status/500)
+  echo "Fast failure \$i: HTTP \$response"
+  if [ "\$response" = "503" ]; then
+    echo "Circuit breaker opened after \$i errors"
+    break
+  fi
+  sleep 0.5
+done
+
+echo ""
+echo "Test 2: Quick recovery (15s ejection time)"
+echo "Waiting 16 seconds for recovery..."
+sleep 16
+
+response=\$(kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code}" http://backend/status/200)
+echo "Recovery test: HTTP \$response"
+
+echo ""
+echo "Test 3: Higher connection capacity (20 connections)"
+for i in {1..25}; do
+  kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code} " http://backend/delay/1 &
+done
+wait
+echo ""
+
+echo "Advanced testing completed"
+EOF
+chmod +x advanced-test.sh
+./advanced-test.sh
+Step 2: Compare Performance Metrics
+Check the improved metrics:
+
+# Get updated backend pod
+BACKEND_POD=$(kubectl get pods -n circuit-breaker-demo -l app=backend -o jsonpath='{.items[0].metadata.name}')
+
+echo "=== Circuit Breaker Statistics ==="
+kubectl exec -n circuit-breaker-demo $BACKEND_POD -c istio-proxy -- curl -s localhost:15000/stats | grep -E "(circuit_breaker|outlier_detection|upstream_rq_pending)" | head -10
+Subtask 3.4: Create Custom Circuit Breaker Profiles
+Step 1: Create Different Profiles for Different Services
+Create a high-traffic service profile:
+
+cat <<EOF > high-traffic-circuit-breaker.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: high-traffic-profile
+  namespace: circuit-breaker-demo
+spec:
+  host: backend.circuit-breaker-demo.svc.cluster.local
+  trafficPolicy:
+    outlierDetection:
+      consecutiveGatewayErrors: 5
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 60s
+      maxEjectionPercent: 50
+      minHealthPercent: 30
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 10s
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+        maxRequestsPerConnection: 10
+        maxRetries: 3
+  portLevelSettings:
+  - port:
+      number: 80
+    connectionPool:
+      tcp:
+        maxConnections: 50
+EOF
+Create a critical service profile:
+
+cat <<EOF > critical-service-circuit-breaker.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: critical-service-profile
+  namespace: circuit-breaker-demo
+spec:
+  host: backend.circuit-breaker-demo.svc.cluster.local
+  trafficPolicy:
+    outlierDetection:
+      consecutiveGatewayErrors: 1
+      consecutive5xxErrors: 1
+      interval: 5s
+      baseEjectionTime: 10s
+      maxEjectionPercent: 90
+      minHealthPercent: 10
+    connectionPool:
+      tcp:
+        maxConnections: 5
+        connectTimeout: 2s
+      http:
+        http1MaxPendingRequests: 2
+        http2MaxRequests: 5
+        maxRequestsPerConnection: 1
+        maxRetries: 1
+EOF
+Step 2: Test Different Profiles
+Apply the critical service profile:
+
+kubectl delete destinationrule backend-circuit-breaker-optimized -n circuit-breaker-demo
+kubectl apply -f critical-service-circuit-breaker.yaml
+Test the critical service behavior:
+
+echo "Testing critical service profile..."
+response=$(kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code}" http://backend/status/500)
+echo "First error: HTTP $response"
+
+response=$(kubectl exec -it test-client -n circuit-breaker-demo -- curl -s -o /dev/null -w "%{http_code}" http://backend/status/200)
+echo "After one error: HTTP $response"
+Troubleshooting Common Issues
+Issue 1: Circuit Breaker Not Activating
+Symptoms: Requests continue to succeed even when errors are expected
+
+Solutions:
+
+# Check if Istio injection is enabled
+kubectl get namespace circuit-breaker-demo --show-labels
+
+# Verify DestinationRule is applied correctly
+kubectl get destinationrule -n circuit-breaker-demo -o yaml
+
+# Check Envoy configuration
+kubectl exec -n circuit-breaker-demo $BACKEND_POD -c istio-proxy -- curl -s localhost:15000/config_dump | grep circuit_breaker
+Issue 2: All Requests Failing
+Symptoms: All requests return 503 status codes
+
+Solutions:
+
+# Check if all instances are ejected
+kubectl exec -n circuit-breaker-demo $BACKEND_POD -c istio-proxy -- curl -s localhost:15000/stats | grep outlier_detection.ejections_active
+
+# Reduce maxEjectionPercent or increase minHealthPercent
+# Wait for baseEjectionTime to pass for recovery
+Issue 3: Inconsistent Behavior
+Symptoms: Circuit breaker behavior varies between requests
+
+Solutions:
+
+# Check if multiple DestinationRules exist
+kubectl get destinationrule -n circuit-breaker-demo
+
+# Verify service mesh configuration
+istioctl proxy-config cluster test-client.circuit-breaker-demo
+Monitoring and Observability
+Setting Up Prometheus Metrics
+Create a ServiceMonitor for circuit breaker metrics:
+
+cat <<EOF > circuit-breaker-monitoring.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: circuit-breaker-metrics
+  namespace: circuit-breaker-demo
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  endpoints:
+  - port: http-monitoring
+    interval: 15s
+    path: /stats/prometheus
+EOF
+Key Metrics to Monitor
+Important circuit breaker metrics to track:
+
+envoy_cluster_outlier_detection_ejections_active: Number of currently ejected hosts
+envoy_cluster_upstream_rq_pending: Number of pending requests
+envoy_cluster_upstream_rq_retry: Number of retried requests
+envoy_cluster_upstream_rq_timeout: Number of timed-out requests
+envoy_http_downstream_rq_xx: HTTP response code distributions
+Best Practices and Recommendations
+Circuit Breaker Configuration Guidelines
+Start Conservative: Begin with higher thresholds and gradually tighten them
+Monitor Closely: Always monitor the impact of circuit breaker changes
+Test Thoroughly: Use load testing to validate configuration changes
+Consider Service Criticality: Critical services need different thresholds
+Plan for Recovery: Ensure baseEjectionTime allows for proper recovery
+Production Considerations
+# Example production-ready configuration
+cat <<EOF > production-circuit-breaker.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: production-circuit-breaker
+  namespace: production
+spec:
+  host: critical-service.production.svc.cluster.local
+  trafficPolicy:
+    outlierDetection:
+      consecutiveGatewayErrors: 3
+      consecutive5xxErrors: 3
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 50
+      splitExternalLocalOriginErrors: true
+    connectionPool:
+      tcp:
+        maxConnections: 32
+        connectTimeout: 10s
+        tcpKeepalive:
+          time: 7200s
+          interval: 75s
+      http:
+        http1MaxPendingRequests: 10
+        http2MaxRequests: 32
+        maxRequestsPerConnection: 3
+        maxRetries: 3
+        consecutiveGatewayErrors: 5
+        h2UpgradePolicy: UPGRADE
+EOF
+Cleanup
+Remove all resources created in this lab:
+
+kubectl delete namespace circuit-breaker-demo
+rm -f *.yaml *.sh
+Conclusion
+In this comprehensive lab, you have successfully:
+
+Implemented Circuit Breakers: Configured Istio DestinationRules with circuit breaker policies to prevent cascading failures in a microservices environment.
+
+Simulated Real-World Failures: Created various failure scenarios including HTTP errors, connection overloads, and service timeouts to test circuit breaker functionality.
+
+Monitored Circuit Breaker Actions: Used Envoy proxy statistics and Istio observability tools to monitor circuit breaker behavior and understand when circuits open and close.
+
+Fine-Tuned Thresholds: Optimized circuit breaker parameters including consecutive error counts, ejection times, and connection pool limits for different service profiles.
+
+Applied Best Practices: Learned how to configure circuit breakers for different types of services (high-traffic vs. critical services) and understood the trade-offs between sensitivity and stability.
+
+Why This Matters
+Circuit breakers are essential for building resilient microservices architectures because they:
+
+Prevent Cascading Failures: Stop failures from propagating through your entire system
+Improve System Stability: Provide graceful degradation when services are unhealthy
+Enable Fast Recovery: Allow services to recover quickly once they become healthy again
+Reduce Resource Waste: Prevent unnecessary load on failing services
+Enhance User Experience: Provide predictable behavior during service outages
+Next Steps
+To further enhance your circuit breaker implementation:
+
+Integrate with Monitoring: Set up alerts based on circuit breaker metrics
+Implement Fallback Strategies: Create backup responses when circuits are open
+Use Bulkhead Patterns: Combine circuit breakers with resource isolation
+Test Chaos Engineering: Use tools like Chaos Monkey to test resilience
+Implement Health Checks: Combine circuit breakers with proper health checking
+The skills you've learned in this lab are directly applicable to production environments and are essential for maintaining reliable microservices at scale. Circuit breakers, when properly configured and monitored, significantly improve the resilience and reliability of distributed systems.

@@ -1,0 +1,41 @@
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: backend-circuit-breaker-optimized
+  namespace: circuit-breaker-demo
+spec:
+  host: backend.circuit-breaker-demo.svc.cluster.local
+  trafficPolicy:
+    outlierDetection:
+      # Reduce consecutive errors for faster detection
+      consecutiveGatewayErrors: 2
+      consecutive5xxErrors: 2
+      # Check more frequently
+      interval: 10s
+      # Shorter ejection time for faster recovery
+      baseEjectionTime: 15s
+      # Allow higher ejection percentage
+      maxEjectionPercent: 75
+      # Require at least one healthy instance
+      minHealthPercent: 25
+      # Split window for better detection
+      splitExternalLocalOriginErrors: true
+    connectionPool:
+      tcp:
+        # Increase max connections for higher throughput
+        maxConnections: 20
+        # Add connection timeout
+        connectTimeout: 5s
+      http:
+        # Increase pending requests
+        http1MaxPendingRequests: 10
+        # Increase concurrent requests
+        http2MaxRequests: 20
+        # Allow more requests per connection
+        maxRequestsPerConnection: 5
+        # Reduce retries to fail faster
+        maxRetries: 2
+        # Add request timeout
+        h2UpgradePolicy: UPGRADE
+        # Enable keep-alive
+        useClientProtocol: true

@@ -1,0 +1,24 @@
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: critical-service-profile
+  namespace: circuit-breaker-demo
+spec:
+  host: backend.circuit-breaker-demo.svc.cluster.local
+  trafficPolicy:
+    outlierDetection:
+      consecutiveGatewayErrors: 1
+      consecutive5xxErrors: 1
+      interval: 5s
+      baseEjectionTime: 10s
+      maxEjectionPercent: 90
+      minHealthPercent: 10
+    connectionPool:
+      tcp:
+        maxConnections: 5
+        connectTimeout: 2s
+      http:
+        http1MaxPendingRequests: 2
+        http2MaxRequests: 5
+        maxRequestsPerConnection: 1
+        maxRetries: 1
