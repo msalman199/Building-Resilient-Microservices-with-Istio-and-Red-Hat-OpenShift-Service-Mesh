@@ -1,0 +1,20 @@
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: failure-simulator-retry
+  namespace: resilient-services
+spec:
+  hosts:
+  - failure-simulator
+  http:
+  - timeout: 10s
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+      retryOn: 5xx,reset,connect-failure,refused-stream
+      retryRemoteLocalities: true
+    route:
+    - destination:
+        host: failure-simulator
+        port:
+          number: 8080

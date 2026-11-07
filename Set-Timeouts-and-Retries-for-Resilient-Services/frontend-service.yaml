@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-service
+  namespace: resilient-services
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend-service
+  template:
+    metadata:
+      labels:
+        app: frontend-service
+        version: v1
+    spec:
+      containers:
+      - name: frontend
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: config
+          mountPath: /etc/nginx/conf.d
+      volumes:
+      - name: config
+        configMap:
+          name: frontend-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: resilient-services
+spec:
+  selector:
+    app: frontend-service
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP

@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-service
+  namespace: resilient-services
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend-service
+  template:
+    metadata:
+      labels:
+        app: backend-service
+        version: v1
+    spec:
+      containers:
+      - name: backend
+        image: httpd:alpine
+        ports:
+        - containerPort: 80
+        env:
+        - name: DELAY_SECONDS
+          value: "0"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: resilient-services
+spec:
+  selector:
+    app: backend-service
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP

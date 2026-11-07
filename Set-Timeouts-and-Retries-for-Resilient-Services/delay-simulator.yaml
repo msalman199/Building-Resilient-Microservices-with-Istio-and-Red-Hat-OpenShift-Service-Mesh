@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: delay-simulator
+  namespace: resilient-services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: delay-simulator
+  template:
+    metadata:
+      labels:
+        app: delay-simulator
+        version: v1
+    spec:
+      containers:
+      - name: delay-sim
+        image: python:3.9-slim
+        ports:
+        - containerPort: 8080
+        command: ["python", "-c"]
+        args:
+        - |
+          import http.server
+          import socketserver
+          import time
+          import os
+          from urllib.parse import urlparse, parse_qs
+          
+          class DelayHandler(http.server.SimpleHTTPRequestHandler):
+              def do_GET(self):
+                  parsed_url = urlparse(self.path)
+                  query_params = parse_qs(parsed_url.query)
+                  delay = int(query_params.get('delay', [0])[0])
+                  
+                  if delay > 0:
+                      time.sleep(delay)
+                  
+                  self.send_response(200)
+                  self.send_header('Content-type', 'application/json')
+                  self.end_headers()
+                  response = f'{{"message": "Response after {delay} seconds", "timestamp": "{time.time()}"}}'
+                  self.wfile.write(response.encode())
+          
+          PORT = 8080
+          with socketserver.TCPServer(("", PORT), DelayHandler) as httpd:
+              print(f"Server running on port {PORT}")
+              httpd.serve_forever()
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: delay-simulator
+  namespace: resilient-services
+spec:
+  selector:
+    app: delay-simulator
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP

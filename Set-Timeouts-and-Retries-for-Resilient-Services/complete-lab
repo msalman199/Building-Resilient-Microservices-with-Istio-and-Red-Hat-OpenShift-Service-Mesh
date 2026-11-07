@@ -1,0 +1,631 @@
+Lab 12: Set Timeouts and Retries for Resilient Services
+Objectives
+By the end of this lab, you will be able to:
+
+Configure request timeouts for microservices to prevent hanging requests
+Implement retry mechanisms for handling transient failures
+Test timeout and retry configurations under various failure scenarios
+Understand the importance of circuit breaker patterns in microservice architectures
+Monitor and analyze service resilience metrics
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of microservices architecture
+Familiarity with Kubernetes concepts (pods, services, deployments)
+Knowledge of YAML configuration files
+Understanding of HTTP status codes and network concepts
+Experience with command-line tools and text editors
+Lab Environment Setup
+Ready-to-Use Cloud Machines: Al Nafi provides Linux-based cloud machines with all necessary tools pre-installed. Simply click Start Lab to begin - no need to build your own VM or install additional software.
+
+Your lab environment includes:
+
+Kubernetes cluster (minikube)
+Istio service mesh
+kubectl command-line tool
+curl and other networking utilities
+Text editors (nano, vim)
+Task 1: Set Up Request Timeouts for Services
+Subtask 1.1: Deploy Sample Microservices
+First, we'll deploy a set of sample microservices that will demonstrate timeout and retry behaviors.
+
+Create a namespace for our lab:
+kubectl create namespace resilient-services
+kubectl label namespace resilient-services istio-injection=enabled
+Create the frontend service deployment:
+cat << 'EOF' > frontend-service.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-service
+  namespace: resilient-services
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend-service
+  template:
+    metadata:
+      labels:
+        app: frontend-service
+        version: v1
+    spec:
+      containers:
+      - name: frontend
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: config
+          mountPath: /etc/nginx/conf.d
+      volumes:
+      - name: config
+        configMap:
+          name: frontend-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: resilient-services
+spec:
+  selector:
+    app: frontend-service
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP
+EOF
+Create the backend service that will simulate delays:
+cat << 'EOF' > backend-service.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-service
+  namespace: resilient-services
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend-service
+  template:
+    metadata:
+      labels:
+        app: backend-service
+        version: v1
+    spec:
+      containers:
+      - name: backend
+        image: httpd:alpine
+        ports:
+        - containerPort: 80
+        env:
+        - name: DELAY_SECONDS
+          value: "0"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: resilient-services
+spec:
+  selector:
+    app: backend-service
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP
+EOF
+Create a delay simulator service:
+cat << 'EOF' > delay-simulator.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: delay-simulator
+  namespace: resilient-services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: delay-simulator
+  template:
+    metadata:
+      labels:
+        app: delay-simulator
+        version: v1
+    spec:
+      containers:
+      - name: delay-sim
+        image: python:3.9-slim
+        ports:
+        - containerPort: 8080
+        command: ["python", "-c"]
+        args:
+        - |
+          import http.server
+          import socketserver
+          import time
+          import os
+          from urllib.parse import urlparse, parse_qs
+          
+          class DelayHandler(http.server.SimpleHTTPRequestHandler):
+              def do_GET(self):
+                  parsed_url = urlparse(self.path)
+                  query_params = parse_qs(parsed_url.query)
+                  delay = int(query_params.get('delay', [0])[0])
+                  
+                  if delay > 0:
+                      time.sleep(delay)
+                  
+                  self.send_response(200)
+                  self.send_header('Content-type', 'application/json')
+                  self.end_headers()
+                  response = f'{{"message": "Response after {delay} seconds", "timestamp": "{time.time()}"}}'
+                  self.wfile.write(response.encode())
+          
+          PORT = 8080
+          with socketserver.TCPServer(("", PORT), DelayHandler) as httpd:
+              print(f"Server running on port {PORT}")
+              httpd.serve_forever()
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: delay-simulator
+  namespace: resilient-services
+spec:
+  selector:
+    app: delay-simulator
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP
+EOF
+Deploy all services:
+kubectl apply -f frontend-service.yaml
+kubectl apply -f backend-service.yaml
+kubectl apply -f delay-simulator.yaml
+Verify deployments are running:
+kubectl get pods -n resilient-services
+kubectl get services -n resilient-services
+Subtask 1.2: Configure Basic Timeouts with Istio
+Now we'll configure timeouts using Istio's traffic management features.
+
+Create a VirtualService with timeout configuration:
+cat << 'EOF' > timeout-virtualservice.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: delay-simulator-timeout
+  namespace: resilient-services
+spec:
+  hosts:
+  - delay-simulator
+  http:
+  - timeout: 3s
+    route:
+    - destination:
+        host: delay-simulator
+        port:
+          number: 8080
+EOF
+Apply the VirtualService:
+kubectl apply -f timeout-virtualservice.yaml
+Create a test pod to verify timeout behavior:
+cat << 'EOF' > test-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client
+  namespace: resilient-services
+spec:
+  containers:
+  - name: test-client
+    image: curlimages/curl:latest
+    command: ["sleep", "3600"]
+EOF
+kubectl apply -f test-pod.yaml
+Subtask 1.3: Test Timeout Configuration
+Test normal response (should succeed):
+kubectl exec -n resilient-services test-client -- curl -s "http://delay-simulator:8080/?delay=1"
+Test timeout scenario (should fail after 3 seconds):
+kubectl exec -n resilient-services test-client -- curl -s -w "Time: %{time_total}s\n" "http://delay-simulator:8080/?delay=5"
+Monitor the timeout behavior:
+kubectl exec -n resilient-services test-client -- time curl -s "http://delay-simulator:8080/?delay=5"
+Task 2: Enable Retries for Transient Failures
+Subtask 2.1: Create a Failure Simulator Service
+Create a service that randomly fails to simulate transient errors:
+cat << 'EOF' > failure-simulator.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: failure-simulator
+  namespace: resilient-services
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: failure-simulator
+  template:
+    metadata:
+      labels:
+        app: failure-simulator
+        version: v1
+    spec:
+      containers:
+      - name: failure-sim
+        image: python:3.9-slim
+        ports:
+        - containerPort: 8080
+        command: ["python", "-c"]
+        args:
+        - |
+          import http.server
+          import socketserver
+          import random
+          import time
+          from urllib.parse import urlparse, parse_qs
+          
+          class FailureHandler(http.server.SimpleHTTPRequestHandler):
+              def do_GET(self):
+                  parsed_url = urlparse(self.path)
+                  query_params = parse_qs(parsed_url.query)
+                  failure_rate = float(query_params.get('failure_rate', [0.3])[0])
+                  
+                  if random.random() < failure_rate:
+                      self.send_response(503)
+                      self.send_header('Content-type', 'application/json')
+                      self.end_headers()
+                      response = '{"error": "Service temporarily unavailable"}'
+                      self.wfile.write(response.encode())
+                  else:
+                      self.send_response(200)
+                      self.send_header('Content-type', 'application/json')
+                      self.end_headers()
+                      response = f'{{"message": "Success", "timestamp": "{time.time()}"}}'
+                      self.wfile.write(response.encode())
+          
+          PORT = 8080
+          with socketserver.TCPServer(("", PORT), FailureHandler) as httpd:
+              print(f"Failure simulator running on port {PORT}")
+              httpd.serve_forever()
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: failure-simulator
+  namespace: resilient-services
+spec:
+  selector:
+    app: failure-simulator
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP
+EOF
+Deploy the failure simulator:
+kubectl apply -f failure-simulator.yaml
+Subtask 2.2: Configure Retry Policies
+Create a VirtualService with retry configuration:
+cat << 'EOF' > retry-virtualservice.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: failure-simulator-retry
+  namespace: resilient-services
+spec:
+  hosts:
+  - failure-simulator
+  http:
+  - timeout: 10s
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+      retryOn: 5xx,reset,connect-failure,refused-stream
+      retryRemoteLocalities: true
+    route:
+    - destination:
+        host: failure-simulator
+        port:
+          number: 8080
+EOF
+Apply the retry configuration:
+kubectl apply -f retry-virtualservice.yaml
+Subtask 2.3: Configure Circuit Breaker Pattern
+Create a DestinationRule with circuit breaker settings:
+cat << 'EOF' > circuit-breaker-destinationrule.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: failure-simulator-circuit-breaker
+  namespace: resilient-services
+spec:
+  host: failure-simulator
+  trafficPolicy:
+    outlierDetection:
+      consecutiveGatewayErrors: 3
+      consecutive5xxErrors: 3
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 30
+    connectionPool:
+      tcp:
+        maxConnections: 10
+      http:
+        http1MaxPendingRequests: 10
+        maxRequestsPerConnection: 2
+        maxRetries: 3
+        connectTimeout: 30s
+        h2UpgradePolicy: UPGRADE
+EOF
+Apply the circuit breaker configuration:
+kubectl apply -f circuit-breaker-destinationrule.yaml
+Task 3: Test Retries and Timeouts Under Various Conditions
+Subtask 3.1: Test Retry Behavior
+Test the failure simulator without retries first. Create a simple test script:
+cat << 'EOF' > test-retries.sh
+#!/bin/bash
+
+echo "Testing failure simulator with retries..."
+echo "========================================="
+
+# Test with 30% failure rate
+echo "Test 1: 30% failure rate (should mostly succeed with retries)"
+for i in {1..10}; do
+    echo -n "Request $i: "
+    kubectl exec -n resilient-services test-client -- curl -s -w "%{http_code}" "http://failure-simulator:8080/?failure_rate=0.3" -o /dev/null
+    echo ""
+done
+
+echo ""
+echo "Test 2: 70% failure rate (some may still fail after retries)"
+for i in {1..10}; do
+    echo -n "Request $i: "
+    kubectl exec -n resilient-services test-client -- curl -s -w "%{http_code}" "http://failure-simulator:8080/?failure_rate=0.7" -o /dev/null
+    echo ""
+done
+EOF
+Make the script executable and run it:
+chmod +x test-retries.sh
+./test-retries.sh
+Subtask 3.2: Test Combined Timeout and Retry Scenarios
+Create a comprehensive test for both timeout and retry scenarios:
+cat << 'EOF' > comprehensive-test.sh
+#!/bin/bash
+
+echo "Comprehensive Timeout and Retry Testing"
+echo "======================================="
+
+# Test 1: Normal operation
+echo "Test 1: Normal operation (no delay, no failures)"
+kubectl exec -n resilient-services test-client -- curl -s "http://delay-simulator:8080/?delay=0"
+echo ""
+
+# Test 2: Timeout scenario
+echo "Test 2: Timeout scenario (5 second delay with 3 second timeout)"
+start_time=$(date +%s)
+kubectl exec -n resilient-services test-client -- curl -s -m 5 "http://delay-simulator:8080/?delay=5" || echo "Request timed out as expected"
+end_time=$(date +%s)
+echo "Total time: $((end_time - start_time)) seconds"
+echo ""
+
+# Test 3: Retry with failures
+echo "Test 3: Retry scenario with transient failures"
+for i in {1..5}; do
+    echo -n "Attempt $i: "
+    response=$(kubectl exec -n resilient-services test-client -- curl -s -w "%{http_code}" "http://failure-simulator:8080/?failure_rate=0.5" 2>/dev/null)
+    echo "HTTP $response"
+done
+echo ""
+
+# Test 4: Circuit breaker test
+echo "Test 4: Circuit breaker behavior (high failure rate)"
+echo "Sending 20 requests to trigger circuit breaker..."
+success_count=0
+failure_count=0
+
+for i in {1..20}; do
+    response=$(kubectl exec -n resilient-services test-client -- curl -s -w "%{http_code}" "http://failure-simulator:8080/?failure_rate=0.8" -o /dev/null 2>/dev/null)
+    if [[ "$response" == "200" ]]; then
+        ((success_count++))
+    else
+        ((failure_count++))
+    fi
+    echo -n "."
+    sleep 0.5
+done
+
+echo ""
+echo "Results: $success_count successes, $failure_count failures"
+echo "Circuit breaker should have activated to prevent cascading failures"
+EOF
+Run the comprehensive test:
+chmod +x comprehensive-test.sh
+./comprehensive-test.sh
+Subtask 3.3: Monitor and Analyze Service Metrics
+Install Prometheus and Grafana for monitoring (if not already available):
+# Add Prometheus to Istio
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/prometheus.yaml
+Create a monitoring script to check Istio metrics:
+cat << 'EOF' > monitor-metrics.sh
+#!/bin/bash
+
+echo "Monitoring Service Resilience Metrics"
+echo "====================================="
+
+# Check Istio proxy metrics
+echo "1. Request success rate:"
+kubectl exec -n resilient-services test-client -- curl -s "http://prometheus.istio-system:9090/api/v1/query?query=sum(rate(istio_requests_total{destination_service_name=\"failure-simulator\"}[1m]))" | grep -o '"result":\[[^]]*\]'
+
+echo ""
+echo "2. Request duration percentiles:"
+kubectl exec -n resilient-services test-client -- curl -s "http://prometheus.istio-system:9090/api/v1/query?query=histogram_quantile(0.95,sum(rate(istio_request_duration_milliseconds_bucket{destination_service_name=\"failure-simulator\"}[1m]))by(le))" | grep -o '"result":\[[^]]*\]'
+
+echo ""
+echo "3. Circuit breaker status:"
+kubectl get destinationrule failure-simulator-circuit-breaker -n resilient-services -o yaml | grep -A 10 outlierDetection
+EOF
+Run the monitoring script:
+chmod +x monitor-metrics.sh
+./monitor-metrics.sh
+Subtask 3.4: Test Edge Cases and Failure Scenarios
+Create tests for various edge cases:
+cat << 'EOF' > edge-case-tests.sh
+#!/bin/bash
+
+echo "Edge Case Testing for Resilience Patterns"
+echo "========================================="
+
+# Test 1: Rapid successive requests
+echo "Test 1: Rapid successive requests (testing connection pooling)"
+for i in {1..50}; do
+    kubectl exec -n resilient-services test-client -- curl -s "http://failure-simulator:8080/?failure_rate=0.1" -o /dev/null &
+done
+wait
+echo "Completed 50 concurrent requests"
+
+# Test 2: Very long delays
+echo ""
+echo "Test 2: Very long delay (testing timeout behavior)"
+timeout 15s kubectl exec -n resilient-services test-client -- curl -s "http://delay-simulator:8080/?delay=20" || echo "Request properly timed out"
+
+# Test 3: Network partition simulation
+echo ""
+echo "Test 3: Simulating network issues"
+# Scale down the failure simulator to simulate network partition
+kubectl scale deployment failure-simulator --replicas=0 -n resilient-services
+echo "Scaled down failure-simulator, testing requests..."
+kubectl exec -n resilient-services test-client -- curl -s -m 5 "http://failure-simulator:8080/" || echo "Request failed as expected (service unavailable)"
+
+# Restore the service
+kubectl scale deployment failure-simulator --replicas=1 -n resilient-services
+echo "Restored failure-simulator service"
+
+# Wait for pod to be ready
+echo "Waiting for service to be ready..."
+kubectl wait --for=condition=ready pod -l app=failure-simulator -n resilient-services --timeout=60s
+EOF
+Run the edge case tests:
+chmod +x edge-case-tests.sh
+./edge-case-tests.sh
+Verification and Validation
+Verify Timeout Configuration
+Check that timeouts are properly configured:
+kubectl get virtualservice -n resilient-services -o yaml
+Verify timeout behavior with different delay values:
+# Should succeed (under timeout)
+kubectl exec -n resilient-services test-client -- time curl -s "http://delay-simulator:8080/?delay=2"
+
+# Should timeout (over timeout)
+kubectl exec -n resilient-services test-client -- time curl -s "http://delay-simulator:8080/?delay=5"
+Verify Retry Configuration
+Check retry settings:
+kubectl describe virtualservice failure-simulator-retry -n resilient-services
+Verify circuit breaker configuration:
+kubectl describe destinationrule failure-simulator-circuit-breaker -n resilient-services
+Performance and Resilience Validation
+Create a final validation script:
+cat << 'EOF' > final-validation.sh
+#!/bin/bash
+
+echo "Final Validation of Resilience Configuration"
+echo "============================================"
+
+echo "1. Checking service health:"
+kubectl get pods -n resilient-services
+echo ""
+
+echo "2. Testing timeout configuration:"
+echo "   - Quick request (should succeed):"
+kubectl exec -n resilient-services test-client -- curl -s -w "Time: %{time_total}s, Status: %{http_code}\n" "http://delay-simulator:8080/?delay=1" -o /dev/null
+
+echo "   - Slow request (should timeout):"
+kubectl exec -n resilient-services test-client -- curl -s -w "Time: %{time_total}s, Status: %{http_code}\n" "http://delay-simulator:8080/?delay=5" -o /dev/null
+
+echo ""
+echo "3. Testing retry configuration:"
+success=0
+total=10
+for i in $(seq 1 $total); do
+    response=$(kubectl exec -n resilient-services test-client -- curl -s -w "%{http_code}" "http://failure-simulator:8080/?failure_rate=0.4" -o /dev/null)
+    if [[ "$response" == "200" ]]; then
+        ((success++))
+    fi
+done
+echo "   Success rate: $success/$total ($(( success * 100 / total ))%)"
+
+echo ""
+echo "4. Configuration summary:"
+echo "   - Timeout: 3 seconds for delay-simulator"
+echo "   - Retries: 3 attempts with 2s per-try timeout"
+echo "   - Circuit breaker: 3 consecutive errors trigger ejection"
+echo ""
+echo "Validation complete!"
+EOF
+Run the final validation:
+chmod +x final-validation.sh
+./final-validation.sh
+Troubleshooting Common Issues
+Issue 1: Timeouts Not Working
+Problem: Requests are not timing out as expected.
+
+Solution:
+
+# Check if VirtualService is applied correctly
+kubectl get virtualservice -n resilient-services -o yaml
+
+# Verify Istio sidecar injection
+kubectl get pods -n resilient-services -o jsonpath='{.items[*].spec.containers[*].name}'
+Issue 2: Retries Not Triggering
+Problem: Retry mechanism is not working.
+
+Solution:
+
+# Check VirtualService retry configuration
+kubectl describe virtualservice failure-simulator-retry -n resilient-services
+
+# Verify service endpoints
+kubectl get endpoints -n resilient-services
+Issue 3: Circuit Breaker Not Activating
+Problem: Circuit breaker is not ejecting failing instances.
+
+Solution:
+
+# Check DestinationRule configuration
+kubectl describe destinationrule failure-simulator-circuit-breaker -n resilient-services
+
+# Monitor Envoy admin interface for circuit breaker stats
+kubectl exec -n resilient-services deployment/failure-simulator -c istio-proxy -- curl localhost:15000/stats | grep outlier
+Cleanup
+To clean up the lab environment:
+
+# Delete all resources
+kubectl delete namespace resilient-services
+
+# Remove test scripts
+rm -f *.yaml *.sh
+Conclusion
+In this lab, you have successfully:
+
+Configured Request Timeouts: You learned how to set up timeout policies using Istio VirtualServices to prevent requests from hanging indefinitely. This is crucial for maintaining system responsiveness and preventing resource exhaustion.
+
+Implemented Retry Mechanisms: You configured retry policies to handle transient failures automatically, improving service reliability without manual intervention. The retry configuration included specific conditions for when retries should occur and limits to prevent retry storms.
+
+Applied Circuit Breaker Patterns: You implemented circuit breaker functionality using Istio DestinationRules to prevent cascading failures and allow failing services time to recover.
+
+Tested Various Failure Scenarios: You validated your resilience configurations under different conditions including network delays, service failures, and high load situations.
+
+Why This Matters:
+
+Service Reliability: Proper timeout and retry configurations significantly improve the reliability of microservice architectures by handling transient failures gracefully.
+
+User Experience: Users experience better response times and fewer failed requests when services implement proper resilience patterns.
+
+System Stability: Circuit breakers prevent cascading failures that could bring down entire service chains, maintaining overall system stability.
+
+Operational Excellence: These patterns reduce the need for manual intervention during transient issues, allowing systems to self-heal and maintain availability.
+
+Cost Efficiency: By preventing resource waste from hanging connections and failed requests, these patterns contribute to more efficient resource utilization.
+
+The resilience patterns you've implemented in this lab are essential building blocks for production-ready microservice architectures. They form the foundation for creating robust, self-healing systems that can handle the inevitable failures that occur in distributed environments.

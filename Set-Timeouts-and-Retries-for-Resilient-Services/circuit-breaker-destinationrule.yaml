@@ -1,0 +1,24 @@
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: failure-simulator-circuit-breaker
+  namespace: resilient-services
+spec:
+  host: failure-simulator
+  trafficPolicy:
+    outlierDetection:
+      consecutiveGatewayErrors: 3
+      consecutive5xxErrors: 3
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 30
+    connectionPool:
+      tcp:
+        maxConnections: 10
+      http:
+        http1MaxPendingRequests: 10
+        maxRequestsPerConnection: 2
+        maxRetries: 3
+        connectTimeout: 30s
+        h2UpgradePolicy: UPGRADE
