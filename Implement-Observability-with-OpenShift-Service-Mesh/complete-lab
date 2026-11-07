@@ -1,0 +1,618 @@
+Lab 16: Implement Observability with OpenShift Service Mesh
+Objectives
+By the end of this lab, you will be able to:
+
+Configure and access Prometheus for metrics collection in OpenShift Service Mesh
+Set up and customize Grafana dashboards for service mesh visualization
+Create and configure alerts for abnormal service behavior
+Understand the observability stack components in Istio service mesh
+Analyze service performance and health using metrics and dashboards
+Implement proactive monitoring strategies for microservices
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes and OpenShift concepts
+Familiarity with microservices architecture
+Knowledge of Istio service mesh fundamentals
+Experience with YAML configuration files
+Understanding of HTTP protocols and REST APIs
+Basic knowledge of monitoring and observability concepts
+Ready-to-Use Cloud Machines
+Al Nafi provides pre-configured Linux-based cloud machines with all necessary tools installed. Simply click Start Lab to access your environment. No need to build your own VM or install additional software.
+
+Your lab environment includes:
+
+OpenShift cluster with Service Mesh installed
+Sample microservices applications
+Prometheus and Grafana pre-configured
+Command-line tools (oc, kubectl, istioctl)
+Lab Environment Setup
+Task 1: Verify Service Mesh Installation and Deploy Sample Application
+Subtask 1.1: Verify Istio Installation
+First, let's verify that the OpenShift Service Mesh is properly installed and running.
+
+# Check if Istio system namespace exists
+oc get namespace istio-system
+
+# Verify Istio components are running
+oc get pods -n istio-system
+
+# Check Service Mesh Control Plane status
+oc get smcp -n istio-system
+Subtask 1.2: Create Project and Enable Service Mesh
+Create a new project for our sample application and enable service mesh injection.
+
+# Create a new project
+oc new-project bookinfo-observability
+
+# Create ServiceMeshMemberRoll to include our project
+cat <<EOF | oc apply -f -
+apiVersion: maistra.io/v1
+kind: ServiceMeshMemberRoll
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  members:
+  - bookinfo-observability
+EOF
+
+# Verify the project is added to the mesh
+oc get smmr -n istio-system -o yaml
+Subtask 1.3: Deploy Bookinfo Sample Application
+Deploy the Bookinfo application which will generate metrics for our observability setup.
+
+# Deploy the Bookinfo application
+oc apply -f https://raw.githubusercontent.com/istio/istio/release-1.19/samples/bookinfo/platform/kube/bookinfo.yaml -n bookinfo-observability
+
+# Create the Gateway for external access
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: bookinfo-gateway
+  namespace: bookinfo-observability
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+EOF
+
+# Create VirtualService for routing
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: bookinfo
+  namespace: bookinfo-observability
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - bookinfo-gateway
+  http:
+  - match:
+    - uri:
+        exact: /productpage
+    - uri:
+        prefix: /static
+    - uri:
+        exact: /login
+    - uri:
+        exact: /logout
+    - uri:
+        prefix: /api/v1/products
+    route:
+    - destination:
+        host: productpage
+        port:
+          number: 9080
+EOF
+Subtask 1.4: Verify Application Deployment
+# Check if all pods are running
+oc get pods -n bookinfo-observability
+
+# Wait for all pods to be ready
+oc wait --for=condition=ready pod --all -n bookinfo-observability --timeout=300s
+
+# Get the ingress gateway URL
+export GATEWAY_URL=$(oc get route istio-ingressgateway -n istio-system -o jsonpath='{.spec.host}')
+echo "Gateway URL: http://$GATEWAY_URL/productpage"
+Task 2: Access Prometheus and Grafana for Metrics
+Subtask 2.1: Access Prometheus Dashboard
+Prometheus is the metrics collection system in the Istio service mesh. Let's access and explore it.
+
+# Check if Prometheus is running
+oc get pods -n istio-system | grep prometheus
+
+# Create a route to access Prometheus (if not already exists)
+oc expose service prometheus -n istio-system --name=prometheus-route
+
+# Get Prometheus URL
+export PROMETHEUS_URL=$(oc get route prometheus-route -n istio-system -o jsonpath='{.spec.host}')
+echo "Prometheus URL: http://$PROMETHEUS_URL"
+Subtask 2.2: Explore Prometheus Metrics
+Open the Prometheus URL in your browser and explore the available metrics:
+
+Navigate to the Prometheus web interface
+Click on Status → Targets to see all monitored endpoints
+Go to Graph tab and try these sample queries:
+# Total requests to productpage service
+istio_requests_total{destination_service_name="productpage"}
+
+# Request rate for all services
+rate(istio_requests_total[5m])
+
+# Response time percentiles
+histogram_quantile(0.99, rate(istio_request_duration_milliseconds_bucket[5m]))
+
+# Error rate
+rate(istio_requests_total{response_code!~"2.."}[5m])
+Subtask 2.3: Access Grafana Dashboard
+Grafana provides visualization capabilities for the metrics collected by Prometheus.
+
+# Check if Grafana is running
+oc get pods -n istio-system | grep grafana
+
+# Create a route to access Grafana
+oc expose service grafana -n istio-system --name=grafana-route
+
+# Get Grafana URL
+export GRAFANA_URL=$(oc get route grafana-route -n istio-system -o jsonpath='{.spec.host}')
+echo "Grafana URL: http://$GRAFANA_URL"
+Subtask 2.4: Generate Traffic for Metrics
+Before exploring dashboards, let's generate some traffic to create meaningful metrics:
+
+# Generate continuous traffic to the application
+for i in {1..100}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+  echo "Request $i completed"
+  sleep 2
+done &
+
+# You can also generate traffic with different patterns
+# Generate some error traffic
+for i in {1..10}; do
+  curl -s "http://$GATEWAY_URL/productpage/nonexistent" > /dev/null
+  sleep 1
+done &
+Task 3: Visualize Metrics in Grafana Dashboards
+Subtask 3.1: Explore Pre-built Istio Dashboards
+Access Grafana and explore the pre-built Istio dashboards:
+
+Open Grafana URL in your browser
+Navigate to Dashboards → Browse
+Look for Istio-related dashboards:
+Istio Service Dashboard
+Istio Workload Dashboard
+Istio Mesh Dashboard
+Istio Control Plane Dashboard
+Subtask 3.2: Create Custom Dashboard
+Let's create a custom dashboard for our Bookinfo application:
+
+# Create a custom dashboard configuration
+cat <<EOF > bookinfo-dashboard.json
+{
+  "dashboard": {
+    "id": null,
+    "title": "Bookinfo Application Observability",
+    "tags": ["istio", "bookinfo"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(istio_requests_total{destination_service_namespace=\"bookinfo-observability\"}[5m])",
+            "legendFormat": "{{destination_service_name}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Requests/sec"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": 2,
+        "title": "Response Time (99th percentile)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, rate(istio_request_duration_milliseconds_bucket{destination_service_namespace=\"bookinfo-observability\"}[5m]))",
+            "legendFormat": "{{destination_service_name}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Milliseconds"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 0
+        }
+      },
+      {
+        "id": 3,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(istio_requests_total{destination_service_namespace=\"bookinfo-observability\",response_code!~\"2..\"}[5m])",
+            "legendFormat": "{{destination_service_name}}"
+          }
+        ],
+        "yAxes": [
+          {
+            "label": "Errors/sec"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 8
+        }
+      }
+    ],
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    },
+    "refresh": "5s"
+  }
+}
+EOF
+Subtask 3.3: Import Custom Dashboard
+In Grafana, click the + icon and select Import
+Copy the contents of bookinfo-dashboard.json and paste it
+Click Load and then Import
+Your custom dashboard should now be available
+Subtask 3.4: Configure Dashboard Variables
+Add variables to make your dashboard more dynamic:
+
+Go to Dashboard Settings (gear icon)
+Click Variables → Add variable
+Create a variable for namespace:
+Name: namespace
+Type: Query
+Query: label_values(istio_requests_total, destination_service_namespace)
+Create a variable for service:
+Name: service
+Type: Query
+Query: label_values(istio_requests_total{destination_service_namespace="$namespace"}, destination_service_name)
+Task 4: Set Up Alerts for Abnormal Service Behavior
+Subtask 4.1: Configure Prometheus Alert Rules
+Create alert rules for monitoring service health:
+
+# Create PrometheusRule for Istio alerts
+cat <<EOF | oc apply -f -
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: istio-alerts
+  namespace: istio-system
+  labels:
+    app: istio-proxy
+    release: istio
+spec:
+  groups:
+  - name: istio.rules
+    rules:
+    - alert: IstioHighRequestLatency
+      expr: histogram_quantile(0.99, rate(istio_request_duration_milliseconds_bucket{destination_service_namespace="bookinfo-observability"}[5m])) > 1000
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High request latency detected"
+        description: "Request latency is above 1000ms for service {{ \$labels.destination_service_name }}"
+    
+    - alert: IstioHighErrorRate
+      expr: rate(istio_requests_total{destination_service_namespace="bookinfo-observability",response_code!~"2.."}[5m]) > 0.1
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "High error rate detected"
+        description: "Error rate is above 10% for service {{ \$labels.destination_service_name }}"
+    
+    - alert: IstioServiceDown
+      expr: up{job="istio-proxy"} == 0
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Istio service is down"
+        description: "Istio proxy for {{ \$labels.instance }} has been down for more than 1 minute"
+    
+    - alert: IstioLowRequestRate
+      expr: rate(istio_requests_total{destination_service_namespace="bookinfo-observability"}[5m]) < 0.01
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Low request rate detected"
+        description: "Request rate is below 0.01 req/sec for service {{ \$labels.destination_service_name }}"
+EOF
+Subtask 4.2: Configure Alertmanager
+Set up Alertmanager to handle alert notifications:
+
+# Create Alertmanager configuration
+cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-main
+  namespace: istio-system
+type: Opaque
+stringData:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'localhost:587'
+      smtp_from: 'alerts@example.com'
+    
+    route:
+      group_by: ['alertname']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 1h
+      receiver: 'web.hook'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'critical-alerts'
+      - match:
+          severity: warning
+        receiver: 'warning-alerts'
+    
+    receivers:
+    - name: 'web.hook'
+      webhook_configs:
+      - url: 'http://localhost:5001/'
+    
+    - name: 'critical-alerts'
+      webhook_configs:
+      - url: 'http://localhost:5001/critical'
+        send_resolved: true
+    
+    - name: 'warning-alerts'
+      webhook_configs:
+      - url: 'http://localhost:5001/warning'
+        send_resolved: true
+EOF
+Subtask 4.3: Create Grafana Alerts
+Configure alerts directly in Grafana:
+
+Open your custom dashboard
+Edit a panel (e.g., Error Rate panel)
+Go to the Alert tab
+Click Create Alert
+Configure the alert condition:
+Query: rate(istio_requests_total{destination_service_namespace="bookinfo-observability",response_code!~"2.."}[5m])
+Condition: IS ABOVE 0.05
+Evaluation: Every 10s for 30s
+Add notification channels in Alerting → Notification channels
+Subtask 4.4: Test Alert Functionality
+Generate conditions that will trigger alerts:
+
+# Generate high error rate to trigger alerts
+for i in {1..50}; do
+  curl -s "http://$GATEWAY_URL/productpage/error" > /dev/null
+  curl -s "http://$GATEWAY_URL/nonexistent" > /dev/null
+  echo "Error request $i sent"
+  sleep 1
+done
+
+# Generate high latency by overloading the service
+for i in {1..20}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null &
+done
+wait
+
+# Check alert status in Prometheus
+echo "Check alerts at: http://$PROMETHEUS_URL/alerts"
+Subtask 4.5: Create Service Level Objectives (SLOs)
+Define and monitor SLOs for your services:
+
+# Create SLO configuration
+cat <<EOF | oc apply -f -
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: bookinfo-slo
+  namespace: istio-system
+spec:
+  groups:
+  - name: bookinfo.slo
+    rules:
+    - record: bookinfo:availability_rate5m
+      expr: |
+        (
+          rate(istio_requests_total{destination_service_namespace="bookinfo-observability",response_code!~"5.."}[5m])
+          /
+          rate(istio_requests_total{destination_service_namespace="bookinfo-observability"}[5m])
+        )
+    
+    - record: bookinfo:latency_p99_5m
+      expr: |
+        histogram_quantile(0.99,
+          rate(istio_request_duration_milliseconds_bucket{destination_service_namespace="bookinfo-observability"}[5m])
+        )
+    
+    - alert: BookinfoSLOAvailabilityBreach
+      expr: bookinfo:availability_rate5m < 0.99
+      for: 2m
+      labels:
+        severity: critical
+        slo: availability
+      annotations:
+        summary: "Bookinfo availability SLO breach"
+        description: "Availability is {{ \$value | humanizePercentage }} which is below 99% SLO"
+    
+    - alert: BookinfoSLOLatencyBreach
+      expr: bookinfo:latency_p99_5m > 500
+      for: 5m
+      labels:
+        severity: warning
+        slo: latency
+      annotations:
+        summary: "Bookinfo latency SLO breach"
+        description: "99th percentile latency is {{ \$value }}ms which is above 500ms SLO"
+EOF
+Advanced Observability Features
+Subtask 5.1: Configure Distributed Tracing
+Enable and configure Jaeger for distributed tracing:
+
+# Check if Jaeger is installed
+oc get pods -n istio-system | grep jaeger
+
+# Create route for Jaeger UI
+oc expose service jaeger-query -n istio-system --name=jaeger-route
+
+# Get Jaeger URL
+export JAEGER_URL=$(oc get route jaeger-route -n istio-system -o jsonpath='{.spec.host}')
+echo "Jaeger URL: http://$JAEGER_URL"
+
+# Generate traced requests
+for i in {1..20}; do
+  curl -H "x-request-id: trace-$i" "http://$GATEWAY_URL/productpage"
+  sleep 2
+done
+Subtask 5.2: Configure Custom Metrics
+Create custom metrics for business-specific monitoring:
+
+# Create EnvoyFilter for custom metrics
+cat <<EOF | oc apply -f -
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: custom-metrics
+  namespace: bookinfo-observability
+spec:
+  configPatches:
+  - applyTo: HTTP_FILTER
+    match:
+      context: SIDECAR_INBOUND
+      listener:
+        filterChain:
+          filter:
+            name: "envoy.filters.network.http_connection_manager"
+    patch:
+      operation: INSERT_BEFORE
+      value:
+        name: envoy.filters.http.wasm
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.http.wasm.v3.Wasm
+          config:
+            configuration:
+              "@type": type.googleapis.com/google.protobuf.StringValue
+              value: |
+                {
+                  "metric_name": "custom_requests_total",
+                  "labels": {
+                    "custom_label": "custom_value"
+                  }
+                }
+EOF
+Troubleshooting Common Issues
+Issue 1: Metrics Not Appearing
+If metrics are not showing up in Prometheus:
+
+# Check if Istio proxy is injected
+oc get pods -n bookinfo-observability -o jsonpath='{.items[*].spec.containers[*].name}'
+
+# Verify ServiceMonitor exists
+oc get servicemonitor -n istio-system
+
+# Check Prometheus targets
+curl -s "http://$PROMETHEUS_URL/api/v1/targets" | jq '.data.activeTargets[] | select(.labels.job=="istio-proxy")'
+Issue 2: Grafana Dashboard Not Loading
+If Grafana dashboards are not loading properly:
+
+# Check Grafana pod logs
+oc logs -n istio-system deployment/grafana
+
+# Verify Grafana can reach Prometheus
+oc exec -n istio-system deployment/grafana -- curl -s http://prometheus:9090/api/v1/query?query=up
+Issue 3: Alerts Not Firing
+If alerts are not triggering:
+
+# Check PrometheusRule status
+oc get prometheusrule -n istio-system istio-alerts -o yaml
+
+# Verify alert rules are loaded in Prometheus
+curl -s "http://$PROMETHEUS_URL/api/v1/rules" | jq '.data.groups[].rules[] | select(.type=="alerting")'
+
+# Check Alertmanager status
+oc get pods -n istio-system | grep alertmanager
+Performance Optimization
+Optimize Metrics Collection
+# Configure metrics collection intervals
+cat <<EOF | oc apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio
+  namespace: istio-system
+data:
+  mesh: |
+    defaultConfig:
+      proxyStatsMatcher:
+        inclusionRegexps:
+        - ".*outlier_detection.*"
+        - ".*circuit_breakers.*"
+        - ".*upstream_rq_retry.*"
+        - ".*_cx_.*"
+        exclusionRegexps:
+        - ".*osconfig.*"
+EOF
+Conclusion
+In this comprehensive lab, you have successfully implemented observability features in OpenShift Service Mesh. Here's what you accomplished:
+
+Key Achievements:
+
+Metrics Collection: Set up Prometheus to collect comprehensive metrics from your service mesh, including request rates, latency, and error rates.
+
+Visualization: Created and customized Grafana dashboards to visualize service performance and health metrics in real-time.
+
+Alerting: Configured intelligent alerts for abnormal service behavior, including high latency, error rates, and service availability issues.
+
+Advanced Monitoring: Implemented Service Level Objectives (SLOs) and custom metrics for business-specific monitoring requirements.
+
+Distributed Tracing: Enabled Jaeger for end-to-end request tracing across your microservices architecture.
+
+Why This Matters:
+
+Observability is crucial for maintaining reliable microservices in production environments. The skills you've learned enable you to:
+
+Proactively identify issues before they impact users
+Optimize performance based on real metrics and data
+Reduce mean time to resolution (MTTR) when problems occur
+Make data-driven decisions about scaling and resource allocation
+Ensure compliance with service level agreements (SLAs)
+Next Steps:
+
+Explore advanced Istio observability features like access logs and audit trails
+Integrate with external monitoring systems like Splunk or Datadog
+Implement chaos engineering practices to test your observability setup
+Learn about OpenTelemetry for vendor-neutral observability
+Practice incident response procedures using your monitoring setup
+This observability foundation will serve as a critical component in your journey toward building resilient, production-ready microservices with OpenShift Service Mesh.
