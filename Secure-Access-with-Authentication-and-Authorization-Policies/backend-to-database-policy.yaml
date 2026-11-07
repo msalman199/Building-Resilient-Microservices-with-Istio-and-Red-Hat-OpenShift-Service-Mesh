@@ -1,0 +1,20 @@
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: backend-to-database
+  namespace: secure-lab
+spec:
+  selector:
+    matchLabels:
+      app: database
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/default"]
+        namespaces: ["secure-lab"]
+    to:
+    - operation:
+        ports: ["5432"]
+    when:
+    - key: source.labels[app]
+      values: ["backend"]

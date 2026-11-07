@@ -1,0 +1,27 @@
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: role-based-access
+  namespace: secure-lab
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/frontend-sa"]
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/api/public/*"]
+  - from:
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/frontend-sa"]
+    to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/api/admin/*"]
+    when:
+    - key: request.headers[x-user-role]
+      values: ["admin"]

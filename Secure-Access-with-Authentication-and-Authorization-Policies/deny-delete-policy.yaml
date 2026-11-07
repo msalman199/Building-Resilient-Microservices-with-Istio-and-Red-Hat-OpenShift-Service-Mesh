@@ -1,0 +1,17 @@
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-delete
+  namespace: secure-lab
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  rules:
+  - to:
+    - operation:
+        methods: ["DELETE"]
+    when:
+    - key: source.labels[app]
+      notValues: ["admin-service"]
+  action: DENY

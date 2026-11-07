@@ -1,0 +1,520 @@
+Lab 14: Secure Access with Authentication and Authorization Policies
+Objectives
+By the end of this lab, you will be able to:
+
+Understand the difference between authentication and authorization in service mesh
+Configure mutual TLS (mTLS) authentication policies for secure service communication
+Define and implement authorization policies to control service-to-service access
+Test and validate policy enforcement in a microservices environment
+Troubleshoot common authentication and authorization issues
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with Istio service mesh fundamentals
+Knowledge of YAML configuration files
+Understanding of microservices architecture
+Basic command-line interface experience
+Required Tools:
+
+kubectl CLI tool
+istioctl CLI tool
+curl or similar HTTP client
+Lab Environment Setup
+Good News! Al Nafi provides ready-to-use Linux-based cloud machines with all necessary tools pre-installed. Simply click Start Lab to begin - no need to build your own VM or install software.
+
+Your lab environment includes:
+
+Kubernetes cluster with Istio service mesh installed
+Sample microservices applications
+All required CLI tools configured and ready to use
+Task 1: Set Up Policies for Service Authentication
+Subtask 1.1: Deploy Sample Applications
+First, let's deploy a set of microservices that we'll use to demonstrate authentication policies.
+
+Create a namespace for our lab:
+kubectl create namespace secure-lab
+kubectl label namespace secure-lab istio-injection=enabled
+Deploy the sample applications:
+Create a file called sample-apps.yaml:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: secure-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+        version: v1
+    spec:
+      containers:
+      - name: frontend
+        image: nginx:1.20
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: secure-lab
+spec:
+  selector:
+    app: frontend
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: secure-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+        version: v1
+    spec:
+      containers:
+      - name: backend
+        image: httpd:2.4
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: secure-lab
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: database
+  namespace: secure-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: database
+  template:
+    metadata:
+      labels:
+        app: database
+        version: v1
+    spec:
+      containers:
+      - name: database
+        image: postgres:13
+        env:
+        - name: POSTGRES_PASSWORD
+          value: "password123"
+        ports:
+        - containerPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: database
+  namespace: secure-lab
+spec:
+  selector:
+    app: database
+  ports:
+  - port: 5432
+    targetPort: 5432
+Apply the configuration:
+kubectl apply -f sample-apps.yaml
+Verify the deployments:
+kubectl get pods -n secure-lab
+kubectl get services -n secure-lab
+Subtask 1.2: Configure Mutual TLS Authentication
+Now we'll implement mutual TLS (mTLS) to ensure all service-to-service communication is authenticated and encrypted.
+
+Create a PeerAuthentication policy for strict mTLS:
+Create a file called peer-authentication.yaml:
+
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: secure-lab
+spec:
+  mtls:
+    mode: STRICT
+Apply the PeerAuthentication policy:
+kubectl apply -f peer-authentication.yaml
+Verify the policy is applied:
+kubectl get peerauthentication -n secure-lab
+Subtask 1.3: Test Authentication Without Proper Configuration
+Let's test what happens when a service tries to communicate without proper mTLS configuration.
+
+Deploy a test pod without Istio sidecar:
+Create a file called test-pod.yaml:
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-client
+  namespace: secure-lab
+  annotations:
+    sidecar.istio.io/inject: "false"
+spec:
+  containers:
+  - name: curl
+    image: curlimages/curl:7.85.0
+    command: ["/bin/sleep", "3600"]
+Apply the test pod:
+kubectl apply -f test-pod.yaml
+Test connectivity from the non-mesh pod:
+kubectl exec -n secure-lab test-client -- curl -s http://backend.secure-lab.svc.cluster.local
+Expected Result: This should fail because the test pod doesn't have an Istio sidecar and cannot participate in mTLS communication.
+
+Subtask 1.4: Test Authentication With Proper Configuration
+Now let's test with a properly configured pod that has the Istio sidecar.
+
+Deploy a test pod with Istio sidecar:
+Create a file called mesh-test-pod.yaml:
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mesh-test-client
+  namespace: secure-lab
+  labels:
+    app: test-client
+spec:
+  containers:
+  - name: curl
+    image: curlimages/curl:7.85.0
+    command: ["/bin/sleep", "3600"]
+Apply the mesh test pod:
+kubectl apply -f mesh-test-pod.yaml
+Test connectivity from the mesh-enabled pod:
+kubectl exec -n secure-lab mesh-test-client -c curl -- curl -s http://backend.secure-lab.svc.cluster.local
+Expected Result: This should succeed because both pods have Istio sidecars and can establish mTLS connections.
+
+Task 2: Define Service-to-Service Communication Policies
+Subtask 2.1: Create Basic Authorization Policies
+Now we'll implement authorization policies to control which services can communicate with each other.
+
+Create a default deny-all policy:
+Create a file called deny-all-policy.yaml:
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: secure-lab
+spec:
+  {}
+Apply the deny-all policy:
+kubectl apply -f deny-all-policy.yaml
+Test that all communication is now blocked:
+kubectl exec -n secure-lab mesh-test-client -c curl -- curl -s http://backend.secure-lab.svc.cluster.local
+Expected Result: This should fail with a 403 Forbidden error because we've denied all access by default.
+
+Subtask 2.2: Allow Frontend to Backend Communication
+Let's create a policy that allows the frontend service to communicate with the backend service.
+
+Create an authorization policy for frontend-to-backend communication:
+Create a file called frontend-to-backend-policy.yaml:
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: frontend-to-backend
+  namespace: secure-lab
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/default"]
+        namespaces: ["secure-lab"]
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/frontend"]
+    to:
+    - operation:
+        methods: ["GET", "POST"]
+    when:
+    - key: source.labels[app]
+      values: ["frontend"]
+Apply the authorization policy:
+kubectl apply -f frontend-to-backend-policy.yaml
+Subtask 2.3: Allow Backend to Database Communication
+Now let's create a policy for backend-to-database communication.
+
+Create an authorization policy for backend-to-database communication:
+Create a file called backend-to-database-policy.yaml:
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: backend-to-database
+  namespace: secure-lab
+spec:
+  selector:
+    matchLabels:
+      app: database
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/default"]
+        namespaces: ["secure-lab"]
+    to:
+    - operation:
+        ports: ["5432"]
+    when:
+    - key: source.labels[app]
+      values: ["backend"]
+Apply the authorization policy:
+kubectl apply -f backend-to-database-policy.yaml
+Subtask 2.4: Create Role-Based Access Control
+Let's implement more sophisticated authorization based on custom headers and service accounts.
+
+Create a service account for the frontend:
+kubectl create serviceaccount frontend-sa -n secure-lab
+Update the frontend deployment to use the new service account:
+Create a file called frontend-with-sa.yaml:
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: secure-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+        version: v1
+        role: web-tier
+    spec:
+      serviceAccountName: frontend-sa
+      containers:
+      - name: frontend
+        image: nginx:1.20
+        ports:
+        - containerPort: 80
+Apply the updated frontend deployment:
+kubectl apply -f frontend-with-sa.yaml
+Create an advanced authorization policy with role-based access:
+Create a file called role-based-policy.yaml:
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: role-based-access
+  namespace: secure-lab
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/frontend-sa"]
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/api/public/*"]
+  - from:
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/frontend-sa"]
+    to:
+    - operation:
+        methods: ["GET", "POST"]
+        paths: ["/api/admin/*"]
+    when:
+    - key: request.headers[x-user-role]
+      values: ["admin"]
+Apply the role-based policy:
+kubectl apply -f role-based-policy.yaml
+Task 3: Test Policy Enforcement
+Subtask 3.1: Test Allowed Communications
+Let's verify that our policies are working correctly by testing allowed communications.
+
+Create a test script to simulate frontend behavior:
+Create a file called test-frontend.yaml:
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: frontend-test
+  namespace: secure-lab
+  labels:
+    app: frontend
+spec:
+  serviceAccountName: frontend-sa
+  containers:
+  - name: curl
+    image: curlimages/curl:7.85.0
+    command: ["/bin/sleep", "3600"]
+Apply the frontend test pod:
+kubectl apply -f test-frontend.yaml
+Test allowed communication from frontend to backend:
+kubectl exec -n secure-lab frontend-test -c curl -- curl -s -w "%{http_code}\n" http://backend.secure-lab.svc.cluster.local
+Expected Result: Should return a 200 status code indicating successful communication.
+
+Subtask 3.2: Test Blocked Communications
+Now let's test that unauthorized communications are properly blocked.
+
+Test communication from an unauthorized source:
+kubectl exec -n secure-lab mesh-test-client -c curl -- curl -s -w "%{http_code}\n" http://backend.secure-lab.svc.cluster.local
+Expected Result: Should return a 403 status code indicating access is forbidden.
+
+Test direct database access from frontend (should be blocked):
+kubectl exec -n secure-lab frontend-test -c curl -- curl -s -w "%{http_code}\n" http://database.secure-lab.svc.cluster.local:5432
+Expected Result: Should fail or return an error because frontend shouldn't have direct database access.
+
+Subtask 3.3: Test Header-Based Authorization
+Let's test our role-based access control with custom headers.
+
+Test access to admin endpoints without proper role:
+kubectl exec -n secure-lab frontend-test -c curl -- curl -s -w "%{http_code}\n" http://backend.secure-lab.svc.cluster.local/api/admin/users
+Expected Result: Should return 403 because no admin role header is provided.
+
+Test access to admin endpoints with proper role header:
+kubectl exec -n secure-lab frontend-test -c curl -- curl -s -w "%{http_code}\n" -H "x-user-role: admin" http://backend.secure-lab.svc.cluster.local/api/admin/users
+Expected Result: Should return 200 or the backend's response because the admin role header is provided.
+
+Subtask 3.4: Monitor and Debug Policy Enforcement
+Let's learn how to monitor and debug our security policies.
+
+Check the Istio proxy configuration:
+istioctl proxy-config cluster mesh-test-client.secure-lab
+View authorization policy status:
+kubectl get authorizationpolicy -n secure-lab -o yaml
+Check Envoy access logs for policy decisions:
+kubectl logs -n secure-lab -l app=backend -c istio-proxy --tail=50
+Use istioctl to analyze policy configuration:
+istioctl analyze -n secure-lab
+Subtask 3.5: Create Custom Deny Policies
+Sometimes you need to explicitly deny certain types of access while allowing others.
+
+Create a policy that denies DELETE operations:
+Create a file called deny-delete-policy.yaml:
+
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-delete
+  namespace: secure-lab
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  rules:
+  - to:
+    - operation:
+        methods: ["DELETE"]
+    when:
+    - key: source.labels[app]
+      notValues: ["admin-service"]
+  action: DENY
+Apply the deny policy:
+kubectl apply -f deny-delete-policy.yaml
+Test that DELETE operations are blocked:
+kubectl exec -n secure-lab frontend-test -c curl -- curl -s -w "%{http_code}\n" -X DELETE http://backend.secure-lab.svc.cluster.local/api/data
+Expected Result: Should return 403 because DELETE operations are denied.
+
+Troubleshooting Common Issues
+Issue 1: mTLS Connection Failures
+Symptoms: Services cannot communicate, receiving connection refused or SSL errors.
+
+Solutions:
+
+Verify that both services have Istio sidecars injected
+Check that PeerAuthentication policy is correctly applied
+Ensure namespace has istio-injection=enabled label
+kubectl get pods -n secure-lab -o jsonpath='{.items[*].spec.containers[*].name}'
+Issue 2: Authorization Policy Not Taking Effect
+Symptoms: Policies are applied but access is still allowed/denied incorrectly.
+
+Solutions:
+
+Check policy syntax and selectors
+Verify service account and label matching
+Review policy precedence (DENY policies override ALLOW policies)
+istioctl proxy-config rbac mesh-test-client.secure-lab -o json
+Issue 3: Service Account Issues
+Symptoms: Authorization based on service accounts not working.
+
+Solutions:
+
+Ensure service accounts exist and are assigned to pods
+Verify the principal format: cluster.local/ns/NAMESPACE/sa/SERVICE_ACCOUNT
+Check that pods are using the correct service account
+kubectl get pods -n secure-lab -o jsonpath='{.items[*].spec.serviceAccountName}'
+Lab Validation
+To ensure your lab is working correctly, run these validation commands:
+
+Verify all policies are applied:
+kubectl get peerauthentication,authorizationpolicy -n secure-lab
+Test the complete security chain:
+# This should work (frontend to backend)
+kubectl exec -n secure-lab frontend-test -c curl -- curl -s -w "%{http_code}\n" http://backend.secure-lab.svc.cluster.local
+
+# This should fail (unauthorized client to backend)
+kubectl exec -n secure-lab mesh-test-client -c curl -- curl -s -w "%{http_code}\n" http://backend.secure-lab.svc.cluster.local
+Check Istio configuration:
+istioctl analyze -n secure-lab
+Cleanup
+When you're finished with the lab, clean up the resources:
+
+kubectl delete namespace secure-lab
+Conclusion
+Congratulations! You have successfully completed Lab 14 on Secure Access with Authentication and Authorization Policies. Here's what you accomplished:
+
+Key Achievements:
+
+Implemented mTLS Authentication: You configured mutual TLS to ensure all service-to-service communication is encrypted and authenticated, preventing unauthorized access to your microservices.
+
+Created Authorization Policies: You learned how to define fine-grained access control policies that determine which services can communicate with each other and under what conditions.
+
+Tested Policy Enforcement: You validated that your security policies work correctly by testing both allowed and blocked communications, ensuring your mesh is properly secured.
+
+Implemented Role-Based Access Control: You created sophisticated authorization rules based on service accounts, custom headers, and service labels, providing enterprise-grade security controls.
+
+Why This Matters:
+
+In production microservices environments, security is paramount. The authentication and authorization policies you've implemented provide:
+
+Zero Trust Security: Every service must authenticate before communicating
+Principle of Least Privilege: Services only have access to what they need
+Defense in Depth: Multiple layers of security controls protect your applications
+Compliance Readiness: Fine-grained access controls help meet regulatory requirements
+Real-World Applications:
+
+Financial Services: Protecting sensitive transaction data between services
+Healthcare: Ensuring HIPAA compliance in patient data processing systems
+E-commerce: Securing payment processing and customer data flows
+Government: Meeting strict security requirements for classified systems
+You now have the skills to implement enterprise-grade security in service mesh environments, making your microservices resilient against both external threats and internal security breaches. These policies form the foundation of a secure, compliant, and trustworthy microservices architecture.
+

@@ -1,0 +1,22 @@
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: frontend-to-backend
+  namespace: secure-lab
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/default"]
+        namespaces: ["secure-lab"]
+    - source:
+        principals: ["cluster.local/ns/secure-lab/sa/frontend"]
+    to:
+    - operation:
+        methods: ["GET", "POST"]
+    when:
+    - key: source.labels[app]
+      values: ["frontend"]
