@@ -1,0 +1,339 @@
+Lab 17: Monitor Application Health with Kiali
+Objectives
+By the end of this lab, you will be able to:
+
+Access and navigate the Kiali dashboard interface
+Visualize service mesh topology and understand service relationships
+Monitor service health metrics and traffic patterns
+Identify performance bottlenecks and configuration issues
+Analyze distributed tracing data to troubleshoot microservices
+Configure Kiali settings for optimal monitoring
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with microservices architecture
+Knowledge of Istio service mesh fundamentals
+Experience with command-line interface operations
+Understanding of HTTP protocols and REST APIs
+Lab Environment Setup
+Ready-to-Use Cloud Machines: Al Nafi provides pre-configured Linux-based cloud machines with all necessary tools installed. Simply click Start Lab to begin - no need to build your own VM or install software.
+
+Your lab environment includes:
+
+Kubernetes cluster with Istio service mesh installed
+Kiali dashboard pre-deployed
+Sample microservices application (Bookinfo)
+kubectl and istioctl command-line tools
+Task 1: Access the Kiali Dashboard
+Subtask 1.1: Verify Kiali Installation
+First, let's confirm that Kiali is properly installed in your cluster.
+
+Open your terminal and check if Kiali is running:
+kubectl get pods -n istio-system | grep kiali
+Verify the Kiali service is available:
+kubectl get svc -n istio-system | grep kiali
+Check Kiali deployment status:
+kubectl get deployment kiali -n istio-system
+Expected output should show Kiali pod in Running status and deployment as READY.
+
+Subtask 1.2: Access Kiali Dashboard
+Create a port-forward to access Kiali dashboard:
+kubectl port-forward svc/kiali 20001:20001 -n istio-system
+Open your web browser and navigate to:
+http://localhost:20001
+If prompted for credentials, use the default login:
+Username: admin
+Password: admin
+Note: Keep the terminal with port-forward running throughout the lab.
+
+Subtask 1.3: Explore Kiali Interface
+Once logged in, familiarize yourself with the main navigation menu:
+
+Overview: High-level cluster view
+Graph: Service topology visualization
+Applications: Application-level metrics
+Workloads: Pod and deployment details
+Services: Service mesh services
+Istio Config: Configuration validation
+Click on Overview to see the namespace summary.
+
+Note the different namespaces available in your cluster.
+
+Task 2: Monitor Service Health, Traffic, and Dependencies
+Subtask 2.1: Deploy Sample Application
+Let's deploy the Bookinfo application to have services to monitor.
+
+Create a namespace for the application:
+kubectl create namespace bookinfo
+Enable Istio injection for the namespace:
+kubectl label namespace bookinfo istio-injection=enabled
+Deploy the Bookinfo application:
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/bookinfo/platform/kube/bookinfo.yaml -n bookinfo
+Verify all pods are running:
+kubectl get pods -n bookinfo
+Create the Istio Gateway and VirtualService:
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/bookinfo/networking/bookinfo-gateway.yaml -n bookinfo
+Subtask 2.2: Generate Traffic
+Get the ingress gateway external IP:
+kubectl get svc istio-ingressgateway -n istio-system
+Set environment variables for easier access:
+export INGRESS_HOST=$(kubectl get po -l istio=ingressgateway -n istio-system -o jsonpath='{.items[0].status.hostIP}')
+export INGRESS_PORT=$(kubectl get svc istio-ingressgateway -n istio-system -o jsonpath='{.spec.ports[?(@.name=="http2")].nodePort}')
+export GATEWAY_URL=$INGRESS_HOST:$INGRESS_PORT
+Generate continuous traffic to create meaningful metrics:
+for i in {1..100}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+  echo "Request $i sent"
+  sleep 2
+done &
+This command runs in the background, sending requests every 2 seconds.
+
+Subtask 2.3: Visualize Service Topology
+In Kiali dashboard, navigate to Graph.
+
+Select the bookinfo namespace from the dropdown.
+
+Configure the graph display:
+
+Set Display to show Traffic Animation
+Enable Security badges
+Enable Response Time edges
+Set time range to Last 5 minutes
+Observe the service topology:
+
+productpage service as the entry point
+details and reviews services called by productpage
+ratings service called by reviews
+Click on different services to see detailed metrics in the side panel.
+
+Subtask 2.4: Analyze Service Health Metrics
+Click on the productpage service node in the graph.
+
+In the side panel, examine:
+
+Request rate (requests per second)
+Error rate percentage
+Response time percentiles (P50, P95, P99)
+Navigate to Applications tab and select productpage.
+
+Review the application health indicators:
+
+Health score (should be green/healthy)
+Request volume over time
+Success rate percentage
+Response time trends
+Click on Inbound Metrics to see detailed traffic patterns:
+
+Request volume by source
+Response codes distribution
+Response time histograms
+Subtask 2.5: Monitor Traffic Patterns
+Return to the Graph view.
+
+Change the graph type to Versioned app graph to see service versions.
+
+Observe traffic distribution:
+
+Notice how traffic flows between services
+Identify any load balancing patterns
+Check for any failed requests (red edges)
+Use the time range selector to view different time periods:
+
+Last 1 minute
+Last 5 minutes
+Last 30 minutes
+Enable Idle Nodes to see services with no current traffic.
+
+Task 3: Identify Performance Issues and Misconfigurations
+Subtask 3.1: Introduce Performance Issues
+Let's create some performance issues to practice identification.
+
+Create a destination rule with circuit breaker settings:
+cat <<EOF | kubectl apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: reviews-circuit-breaker
+  namespace: bookinfo
+spec:
+  host: reviews
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 1
+      http:
+        http1MaxPendingRequests: 1
+        maxRequestsPerConnection: 1
+    outlierDetection:
+      consecutiveErrors: 2
+      interval: 30s
+      baseEjectionTime: 30s
+EOF
+Generate high load to trigger circuit breaker:
+for i in {1..50}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null &
+done
+Subtask 3.2: Identify Issues in Kiali
+Wait 2-3 minutes for metrics to populate, then refresh the Kiali graph.
+
+Look for visual indicators of problems:
+
+Red edges indicating errors
+Orange/yellow nodes showing degraded health
+Thick red lines showing high error rates
+Click on the reviews service to examine:
+
+Increased error rate
+Circuit breaker activation
+Response time spikes
+Navigate to Workloads and select reviews-v1.
+
+Check the Logs tab for error messages:
+
+Look for connection refused errors
+Circuit breaker activation logs
+Timeout messages
+Subtask 3.3: Analyze Configuration Issues
+Go to Istio Config in the main menu.
+
+Look for configuration warnings or errors:
+
+Yellow warning icons
+Red error indicators
+Validation messages
+Click on DestinationRules and examine the circuit breaker rule we created.
+
+Check for any configuration conflicts or misconfigurations.
+
+Navigate to VirtualServices and verify routing rules are correct.
+
+Subtask 3.4: Use Distributed Tracing
+In the Graph view, click on an edge between services.
+
+In the side panel, click View Traces.
+
+This opens the distributed tracing view showing:
+
+Trace timeline with service call sequence
+Span details for each service interaction
+Error spans highlighted in red
+Performance bottlenecks with long durations
+Click on individual spans to see:
+
+Service call details
+Headers and metadata
+Error messages and stack traces
+Performance metrics
+Subtask 3.5: Performance Analysis
+Navigate to Services and select productpage.
+
+Click on the Metrics tab to analyze:
+
+Request rate trends over time
+Error rate spikes correlating with our load test
+Response time percentiles showing performance degradation
+Use the Filters to focus on specific time ranges or request types.
+
+Compare metrics before and after introducing the circuit breaker.
+
+Subtask 3.6: Health Score Analysis
+Go to Applications view.
+
+Examine the health scores for each application:
+
+Green: Healthy (>95% success rate)
+Yellow: Degraded (90-95% success rate)
+Red: Unhealthy (<90% success rate)
+Click on applications with degraded health to investigate:
+
+Error rate details
+Failed request patterns
+Performance bottlenecks
+Troubleshooting Common Issues
+Issue 1: Kiali Dashboard Not Loading
+Symptoms: Browser shows connection refused or timeout Solution:
+
+# Check if port-forward is still running
+ps aux | grep "kubectl port-forward"
+
+# Restart port-forward if needed
+kubectl port-forward svc/kiali 20001:20001 -n istio-system
+Issue 2: No Traffic Showing in Graph
+Symptoms: Empty graph or no edges between services Solutions:
+
+Verify traffic generation is running:
+# Check background processes
+jobs
+
+# Generate more traffic if needed
+curl "http://$GATEWAY_URL/productpage"
+Check time range settings in Kiali (try "Last 1 minute")
+Issue 3: Services Not Appearing
+Symptoms: Expected services missing from graph Solution:
+
+# Verify pods are running
+kubectl get pods -n bookinfo
+
+# Check Istio injection
+kubectl get pods -n bookinfo -o jsonpath='{.items[*].spec.containers[*].name}' | grep istio-proxy
+Issue 4: Metrics Not Updating
+Symptoms: Stale or no metrics data Solution:
+
+# Check Prometheus is running
+kubectl get pods -n istio-system | grep prometheus
+
+# Verify telemetry configuration
+kubectl get telemetry -A
+Advanced Configuration
+Customizing Kiali Settings
+Edit Kiali configuration:
+kubectl edit configmap kiali -n istio-system
+Common customizations:
+Refresh intervals: Adjust data refresh rates
+Graph settings: Default layout and display options
+Tracing integration: Configure Jaeger settings
+Setting Up Alerts
+Create a custom dashboard configuration:
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kiali-custom-dashboards
+  namespace: istio-system
+data:
+  custom-dashboard.yaml: |
+    title: Custom Service Health
+    charts:
+    - name: "Error Rate"
+      spans: 6
+      metricName: "request_total"
+      dataType: "rate"
+Cleanup
+When you're finished with the lab, clean up the resources:
+
+Stop traffic generation:
+# Kill background curl processes
+pkill -f "curl.*productpage"
+Remove the circuit breaker rule:
+kubectl delete destinationrule reviews-circuit-breaker -n bookinfo
+Delete the Bookinfo application:
+kubectl delete namespace bookinfo
+Stop the port-forward:
+# Press Ctrl+C in the terminal running port-forward
+Conclusion
+In this lab, you have successfully:
+
+Accessed and navigated the Kiali dashboard to monitor your service mesh
+Visualized service topology and understood how microservices interact
+Monitored real-time traffic patterns and service health metrics
+Identified performance issues using circuit breaker scenarios
+Analyzed distributed traces to troubleshoot service interactions
+Used configuration validation to detect misconfigurations
+Why This Matters: Kiali provides essential observability for service mesh environments, enabling you to:
+
+Proactively identify issues before they impact users
+Understand service dependencies for better architecture decisions
+Optimize performance based on real traffic patterns
+Validate configurations to prevent deployment issues
+Troubleshoot problems quickly using distributed tracing
+These skills are crucial for maintaining reliable microservices in production environments and are highly valued in modern DevOps and Site Reliability Engineering roles. The ability to effectively monitor and troubleshoot service mesh deployments is essential for building resilient, scalable applications.
