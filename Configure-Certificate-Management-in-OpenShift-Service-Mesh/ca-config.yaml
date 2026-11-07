@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ca-config
+  namespace: istio-system
+data:
+  ca-cert-validity: "8760h"  # 1 year
+  workload-cert-validity: "24h"  # 1 day for automatic rotation
+  cert-chain-file: |
+    # Certificate chain configuration

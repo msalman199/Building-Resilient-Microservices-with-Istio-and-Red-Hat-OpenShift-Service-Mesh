@@ -1,0 +1,76 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cert-monitor
+  namespace: cert-management-demo
+spec:
+  schedule: "0 */6 * * *"  # Run every 6 hours
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: cert-monitor-sa
+          containers:
+          - name: cert-monitor
+            image: registry.redhat.io/ubi8/ubi:latest
+            command:
+            - /bin/bash
+            - -c
+            - |
+              # Install required tools
+              yum install -y openssl curl
+              
+              # Certificate monitoring logic
+              echo "=== Automated Certificate Check ==="
+              echo "Timestamp: $(date)"
+              
+              # Check certificates in all pods
+              for pod in $(oc get pods -n cert-management-demo -l app=sample-app -o jsonpath='{.items[*].metadata.name}'); do
+                echo "Checking pod: $pod"
+                
+                # Extract certificate expiry
+                cert_expiry=$(oc exec -n cert-management-demo $pod -c istio-proxy -- cat /etc/ssl/certs/cert-chain.pem | openssl x509 -enddate -noout | cut -d= -f2)
+                echo "Certificate expires: $cert_expiry"
+                
+                # Calculate days until expiry
+                expiry_epoch=$(date -d "$cert_expiry" +%s)
+                current_epoch=$(date +%s)
+                days_until_expiry=$(( (expiry_epoch - current_epoch) / 86400 ))
+                
+                echo "Days until expiry: $days_until_expiry"
+                
+                if [ $days_until_expiry -lt 2 ]; then
+                  echo "⚠️  Certificate renewal needed for pod $pod"
+                fi
+              done
+          restartPolicy: OnFailure
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-monitor-sa
+  namespace: cert-management-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cert-monitor-role
+  namespace: cert-management-demo
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/exec"]
+  verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-monitor-binding
+  namespace: cert-management-demo
+subjects:
+- kind: ServiceAccount
+  name: cert-monitor-sa
+  namespace: cert-management-demo
+roleRef:
+  kind: Role
+  name: cert-monitor-role
+  apiGroup: rbac.authorization.k8s.io

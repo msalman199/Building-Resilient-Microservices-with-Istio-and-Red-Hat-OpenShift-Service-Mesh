@@ -1,0 +1,17 @@
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: cert-management-demo
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cert-rotation-config
+  namespace: cert-management-demo
+data:
+  rotation-interval: "1h"
+  renewal-threshold: "30m"
