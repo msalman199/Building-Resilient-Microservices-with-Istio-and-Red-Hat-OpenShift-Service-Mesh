@@ -1,0 +1,687 @@
+Lab 20: Final Project: Deploy and Manage Microservices in OpenShift Service Mesh
+Objectives
+By the end of this lab, you will be able to:
+
+Deploy a complete microservice-based application using OpenShift Service Mesh
+Implement traffic management policies including canary routing, load balancing, timeouts, and circuit breakers
+Configure security policies including mutual TLS and authorization
+Diagnose and independently fix a broken traffic routing configuration using Istio diagnostic tools
+Test fault resilience mechanisms and explain the observable behavior of circuit breakers
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of Kubernetes concepts (pods, services, deployments)
+Familiarity with OpenShift CLI (oc) commands
+Knowledge of YAML configuration files
+Understanding of microservices architecture principles
+Basic networking concepts (HTTP, TCP, load balancing)
+Experience with containerized applications
+Lab Environment Setup
+Ready-to-Use Cloud Machines: Al Nafi provides pre-configured Linux-based cloud machines with OpenShift and Service Mesh already installed. Simply click Start Lab to access your environment - no need to build your own VM or install software.
+
+Your lab environment includes:
+
+OpenShift 4.12+ cluster with admin access
+Red Hat OpenShift Service Mesh operator installed
+Istio service mesh components deployed
+oc and istioctl CLI tools configured
+Sample microservices application code (Bookinfo)
+No additional package installation is required. Verify tool availability before starting:
+
+oc version --client
+istioctl version --remote=false
+Task 1: Deploy the Microservice Application with Service Mesh
+Subtask 1.1: Verify Service Mesh Installation and Create the Project
+First, confirm that OpenShift Service Mesh is installed and running, then create a project and add it to the mesh.
+
+# Check if Service Mesh operators are installed
+oc get csv -n openshift-operators | grep -E "(servicemesh|jaeger|kiali)"
+
+# Verify Service Mesh Control Plane
+oc get smcp -n istio-system
+
+# Check if all Istio components are running
+oc get pods -n istio-system
+
+# Create a new project for the application
+oc new-project bookinfo-mesh
+
+# Add the project to the service mesh member roll
+cat <<EOF | oc apply -f -
+apiVersion: maistra.io/v1
+kind: ServiceMeshMemberRoll
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  members:
+  - bookinfo-mesh
+EOF
+
+# Enable automatic sidecar injection for the namespace
+oc label namespace bookinfo-mesh istio-injection=enabled --overwrite
+
+# Verify the project is added to the mesh
+oc get smmr -n istio-system -o yaml
+Subtask 1.2: Deploy the Bookinfo Application
+Deploy the sample microservices application. This includes four services: details, ratings, reviews (in three versions), and productpage.
+
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+# Details service
+apiVersion: v1
+kind: Service
+metadata:
+  name: details
+  labels:
+    app: details
+    service: details
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: details
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-details
+  labels:
+    account: details
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: details-v1
+  labels:
+    app: details
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: details
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: details
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-details
+      containers:
+      - name: details
+        image: docker.io/istio/examples-bookinfo-details-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        securityContext:
+          runAsUser: 1000
+---
+# Ratings service
+apiVersion: v1
+kind: Service
+metadata:
+  name: ratings
+  labels:
+    app: ratings
+    service: ratings
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: ratings
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-ratings
+  labels:
+    account: ratings
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ratings-v1
+  labels:
+    app: ratings
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ratings
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: ratings
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-ratings
+      containers:
+      - name: ratings
+        image: docker.io/istio/examples-bookinfo-ratings-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        securityContext:
+          runAsUser: 1000
+---
+# Reviews service (three versions)
+apiVersion: v1
+kind: Service
+metadata:
+  name: reviews
+  labels:
+    app: reviews
+    service: reviews
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: reviews
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-reviews
+  labels:
+    account: reviews
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reviews-v1
+  labels:
+    app: reviews
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reviews
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: reviews
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-reviews
+      containers:
+      - name: reviews
+        image: docker.io/istio/examples-bookinfo-reviews-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        securityContext:
+          runAsUser: 1000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reviews-v2
+  labels:
+    app: reviews
+    version: v2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reviews
+      version: v2
+  template:
+    metadata:
+      labels:
+        app: reviews
+        version: v2
+    spec:
+      serviceAccountName: bookinfo-reviews
+      containers:
+      - name: reviews
+        image: docker.io/istio/examples-bookinfo-reviews-v2:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        securityContext:
+          runAsUser: 1000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reviews-v3
+  labels:
+    app: reviews
+    version: v3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reviews
+      version: v3
+  template:
+    metadata:
+      labels:
+        app: reviews
+        version: v3
+    spec:
+      serviceAccountName: bookinfo-reviews
+      containers:
+      - name: reviews
+        image: docker.io/istio/examples-bookinfo-reviews-v3:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        securityContext:
+          runAsUser: 1000
+---
+# Productpage service
+apiVersion: v1
+kind: Service
+metadata:
+  name: productpage
+  labels:
+    app: productpage
+    service: productpage
+spec:
+  ports:
+  - port: 9080
+    name: http
+  selector:
+    app: productpage
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bookinfo-productpage
+  labels:
+    account: productpage
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: productpage-v1
+  labels:
+    app: productpage
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: productpage
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: productpage
+        version: v1
+    spec:
+      serviceAccountName: bookinfo-productpage
+      containers:
+      - name: productpage
+        image: docker.io/istio/examples-bookinfo-productpage-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        securityContext:
+          runAsUser: 1000
+EOF
+Create the Gateway and an initial (working) VirtualService so the application is reachable from outside the cluster:
+
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: bookinfo-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: bookinfo
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - bookinfo-gateway
+  http:
+  - match:
+    - uri:
+        exact: /productpage
+    - uri:
+        prefix: /static
+    - uri:
+        exact: /login
+    - uri:
+        exact: /logout
+    - uri:
+        prefix: /api/v1/products
+    route:
+    - destination:
+        host: productpage
+        port:
+          number: 9080
+EOF
+Verify the deployment and get the application URL:
+
+# Check all pods are running (2/2 READY indicates the sidecar is injected)
+oc get pods -n bookinfo-mesh
+
+# Check services
+oc get svc -n bookinfo-mesh
+
+# Get the ingress gateway route and test the application
+export INGRESS_HOST=$(oc get route istio-ingressgateway -n istio-system -o jsonpath='{.spec.host}')
+export INGRESS_PORT=80
+echo "Application URL: http://$INGRESS_HOST:$INGRESS_PORT/productpage"
+curl -s "http://$INGRESS_HOST:$INGRESS_PORT/productpage" | grep -o "<title>.*</title>"
+Deliverable 1.2: All pods in bookinfo-mesh show 2/2 READY (application container plus istio-proxy sidecar), and the curl command returns <title>Simple Bookstore App</title>. Save the output of oc get pods -n bookinfo-mesh as evidence.
+
+Task 2: Implement Traffic Management
+Subtask 2.1: Create Destination Rules and a Canary Deployment
+Define destination rules for all four services, then configure a 90/10 weighted canary split between reviews v1 and v2.
+
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: productpage
+spec:
+  host: productpage
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: reviews
+spec:
+  host: reviews
+  trafficPolicy:
+    loadBalancer:
+      simple: LEAST_CONN
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+  - name: v3
+    labels:
+      version: v3
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: ratings
+spec:
+  host: ratings
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: details
+spec:
+  host: details
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+EOF
+
+# Canary VirtualService: 90% of traffic to v1, 10% to v2
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews
+spec:
+  hosts:
+  - reviews
+  http:
+  - match:
+    - headers:
+        end-user:
+          exact: jason
+    route:
+    - destination:
+        host: reviews
+        subset: v2
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+      weight: 90
+    - destination:
+        host: reviews
+        subset: v2
+      weight: 10
+EOF
+Test the routing distribution:
+
+# Expect roughly 9 of 10 requests to show no star rating (v1) and about 1 of 10 to show black stars (v2)
+for i in {1..20}; do
+  curl -s "http://$INGRESS_HOST:$INGRESS_PORT/productpage" | grep -o "glyphicon-star" | wc -l
+  sleep 1
+done
+
+# Requests with the "jason" header should always be routed to v2 (black stars)
+for i in {1..5}; do
+  curl -s -H "end-user: jason" "http://$INGRESS_HOST:$INGRESS_PORT/productpage" | grep -o "glyphicon-star" | wc -l
+  sleep 1
+done
+Deliverable 2.1: Record the count of star-rating occurrences across the 20 unweighted requests and the 5 jason-header requests. The unweighted run should show a roughly 90/10 split between "no rating" and "5 black stars," while every jason request should consistently return "5 black stars" (v2).
+
+Subtask 2.2: Add Resilience Policies and Explain Circuit Breaker Behavior
+Add a timeout/retry policy for reviews, and configure a circuit breaker (outlier detection) on the reviews DestinationRule.
+
+# Add retries and timeout to the reviews route
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: reviews
+spec:
+  hosts:
+  - reviews
+  http:
+  - match:
+    - headers:
+        end-user:
+          exact: jason
+    route:
+    - destination:
+        host: reviews
+        subset: v2
+  - route:
+    - destination:
+        host: reviews
+        subset: v1
+      weight: 90
+    - destination:
+        host: reviews
+        subset: v2
+      weight: 10
+    timeout: 10s
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+EOF
+
+# Add a circuit breaker (outlier detection) to the reviews DestinationRule
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: reviews
+spec:
+  host: reviews
+  trafficPolicy:
+    loadBalancer:
+      simple: LEAST_CONN
+    connectionPool:
+      tcp:
+        maxConnections: 10
+      http:
+        http1MaxPendingRequests: 10
+        maxRequestsPerConnection: 2
+    outlierDetection:
+      consecutiveErrors: 3
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+  - name: v3
+    labels:
+      version: v3
+EOF
+With this configuration, when a reviews pod returns 3 consecutive errors, Envoy ejects that pod instance from the load-balancing pool for baseEjectionTime (30 seconds). During the ejection window, all traffic is routed only to the remaining healthy reviews instances; the ejected pod is automatically returned to the pool once the ejection time expires, and if it fails again the ejection time doubles on subsequent trips. maxEjectionPercent: 50 guarantees that at least half of the instances always remain eligible to receive traffic, preventing a total outage of the service.
+
+Confirm the policies were applied:
+
+oc get destinationrule reviews -n bookinfo-mesh -o yaml | grep -A6 outlierDetection
+oc get virtualservice reviews -n bookinfo-mesh -o yaml | grep -A3 timeout
+Deliverable 2.2: A one-paragraph written note (in your lab journal or terminal history log) stating, in your own words, what happens to a reviews instance after 3 consecutive errors, how long it stays ejected, and why maxEjectionPercent matters. The oc get destinationrule output must show consecutiveErrors: 3 and baseEjectionTime: 30s.
+
+Task 3: Security, Diagnosis, and Independent Troubleshooting
+Subtask 3.1: Enable Mutual TLS and Authorization Policies
+Configure strict mTLS for the namespace and lock down access to the ratings and details services so only their legitimate callers can reach them.
+
+# Enforce strict mTLS across the namespace
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+spec:
+  mtls:
+    mode: STRICT
+EOF
+
+# Only allow the reviews service account to call ratings
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: ratings-policy
+spec:
+  selector:
+    matchLabels:
+      app: ratings
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/bookinfo-mesh/sa/bookinfo-reviews"]
+    to:
+    - operation:
+        methods: ["GET"]
+EOF
+
+# Only allow the productpage service account to call details
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: details-policy
+spec:
+  selector:
+    matchLabels:
+      app: details
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/bookinfo-mesh/sa/bookinfo-productpage"]
+    to:
+    - operation:
+        methods: ["GET"]
+EOF
+Verify the application still works end-to-end, and confirm that a service without an authorized principal is denied:
+
+# Should still succeed (productpage -> details/reviews/ratings call chain is authorized)
+curl -s "http://$INGRESS_HOST:$INGRESS_PORT/productpage" | grep -o "<title>.*</title>"
+
+# Should be DENIED (productpage's own pod has no principal grant to call ratings directly)
+oc exec -n bookinfo-mesh $(oc get pod -n bookinfo-mesh -l app=productpage -o jsonpath='{.items[0].metadata.name}') -c productpage -- curl -s -o /dev/null -w "%{http_code}\n" ratings:9080/ratings/1
+Deliverable 3.1: The productpage curl returns the page title successfully, and the direct productpage to ratings call returns HTTP 403. Save both outputs.
+
+Subtask 3.2: Diagnose and Independently Fix a Broken VirtualService
+A teammate has just pushed a "hotfix" for the bookinfo VirtualService to add a new /api/v1/products header-based rule, but it broke external access to the application. Apply the broken configuration below exactly as written, then diagnose and repair it yourself.
+
+cat <<EOF | oc apply -n bookinfo-mesh -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: bookinfo
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - bookinfo-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /api/v1/products
+      headers:
+        x-debug:
+          exact: "true"
+    route:
+    - destination:
+        host: productpage
+        port:
+          number: 9080
+EOF
+Confirm the application is now broken:
+
+curl -s -o /dev/null -w "HTTP status: %{http_code}\n" "http://$INGRESS_HOST:$INGRESS_PORT/productpage"
+You should observe an HTTP status other than 200 (commonly 404). Do not simply reapply the original working YAML from Task 1 from memory â work through the diagnostic process below and produce your own fix.
+
+Diagnostic steps to perform:
+
+Inspect the currently applied VirtualService and compare its match block against the routes your Gateway needs to serve (/productpage, /static, /login, /logout, /api/v1/products):
+oc get virtualservice bookinfo -n bookinfo-mesh -o yaml
+Run Istio's built-in configuration analyzer to see if it flags the problem:
+istioctl analyze -n bookinfo-mesh
+Inspect the Envoy route configuration on the ingress gateway to confirm which paths are actually being routed:
+istioctl proxy-config routes deploy/istio-ingressgateway -n istio-system --name http.80 -o json
+Check the ingress gateway access logs for the rejected requests:
+oc logs -n istio-system -l istio=ingressgateway --tail=50 | grep productpage
+Your task: Based on what you find in steps 1-4, identify exactly which match conditions are missing or incorrectly scoped (consider: which URI paths no longer have a matching rule, and whether a header requirement is unintentionally restricting a route that should be open to all requests). Write and apply a corrected VirtualService for bookinfo that restores routing for /productpage, /static, /login, /logout, and unconditional /api/v1/products access, while still allowing the option of a separate debug-only rule if you choose to keep one. Do not copy a fix from elsewhere in this document verbatim; construct the http.match list yourself from the diagnostic evidence.
+
+After applying your fix, verify the repair:
+
+curl -s -o /dev/null -w "HTTP status: %{http_code}\n" "http://$INGRESS_HOST:$INGRESS_PORT/productpage"
+curl -s "http://$INGRESS_HOST:$INGRESS_PORT/productpage" | grep -o "<title>.*</title>"
+istioctl analyze -n bookinfo-mesh
+Deliverable 3.2: A corrected bookinfo VirtualService YAML (written by you, not copy-pasted from Task 1) that restores /productpage, /static, /login, /logout, and /api/v1/products routing. The verification curl must return HTTP status: 200 and the page title, and istioctl analyze must report no errors for the bookinfo-mesh namespace. Include a short written note (2-3 sentences) describing which match condition was broken and why it caused the failure.
+
+Expected Outcomes
+A fully functioning Bookinfo application running under OpenShift Service Mesh with sidecar injection, canary traffic splitting, and load balancing across three reviews versions
+Enforced mutual TLS and least-privilege authorization policies between services, verified by both successful and denied requests
+Demonstrated ability to independently diagnose a broken Istio routing configuration using istioctl analyze, route dumps, and access logs, and to repair it with an original fix rather than a memorized answer
+Conclusion
+In this lab you deployed the Bookinfo microservices application onto OpenShift Service Mesh, configured weighted canary routing and load-balancing policies across multiple service versions, and layered in resilience features such as retries, timeouts, and outlier-detection circuit breaking. You then secured inter-service communication with strict mutual TLS and fine-grained authorization policies, confirming both allowed and denied call paths. The final task required you to work through a realistic troubleshooting scenario: given a broken VirtualService, you used istioctl analyze, Envoy route dumps, and gateway logs to identify the missing and overly restrictive match conditions, then authored your own corrected routing configuration rather than reapplying a known-good file. This mirrors the diagnostic workflow required in production service mesh operations, where configuration drift and partial deployments must be identified and repaired directly from cluster evidence rather than from memory.
