@@ -1,0 +1,479 @@
+Lab 18: Use Jaeger for Distributed Tracing in OpenShift Service Mesh
+Objectives
+By the end of this lab, you will be able to:
+
+Configure Jaeger tracing for microservices in OpenShift Service Mesh
+Analyze distributed traces using the Jaeger UI to understand request flows
+Identify performance bottlenecks and latency issues across service boundaries
+Troubleshoot failed requests using trace data and span information
+Implement tracing best practices for microservices observability
+Prerequisites
+Before starting this lab, you should have:
+
+Basic understanding of microservices architecture and distributed systems
+Familiarity with Kubernetes/OpenShift concepts (pods, services, deployments)
+Knowledge of Istio Service Mesh fundamentals
+Experience with command-line interface and YAML configuration files
+Understanding of HTTP protocols and REST APIs
+Required Tools and Knowledge
+OpenShift CLI (oc) commands
+Basic YAML syntax
+Web browser for accessing UIs
+Understanding of observability concepts (metrics, logs, traces)
+Lab Environment Setup
+Al Nafi Cloud Machines: This lab uses pre-configured Linux-based cloud machines provided by Al Nafi. Simply click Start Lab to access your environment - no need to build your own VM or install additional software.
+
+Your lab environment includes:
+
+OpenShift cluster with Service Mesh installed
+Sample microservices application
+Jaeger operator and components
+All necessary CLI tools pre-installed
+Task 1: Set Up Jaeger Tracing for Services
+Subtask 1.1: Verify Service Mesh Installation
+First, let's verify that OpenShift Service Mesh is properly installed and configured.
+
+Check Service Mesh Control Plane:
+oc get smcp -n istio-system
+Verify Jaeger installation:
+oc get jaeger -n istio-system
+Check if Jaeger pods are running:
+oc get pods -n istio-system | grep jaeger
+Expected output should show Jaeger collector, query, and other components in Running state.
+
+Subtask 1.2: Deploy Sample Microservices Application
+We'll deploy a sample bookinfo application to demonstrate distributed tracing.
+
+Create a new project for our application:
+oc new-project bookinfo-tracing
+Label the namespace for Service Mesh injection:
+oc label namespace bookinfo-tracing istio-injection=enabled
+Create Service Mesh Member Roll:
+cat << EOF | oc apply -f -
+apiVersion: maistra.io/v1
+kind: ServiceMeshMemberRoll
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  members:
+  - bookinfo-tracing
+EOF
+Deploy the bookinfo application:
+oc apply -f https://raw.githubusercontent.com/istio/istio/release-1.17/samples/bookinfo/platform/kube/bookinfo.yaml -n bookinfo-tracing
+Verify all pods are running:
+oc get pods -n bookinfo-tracing
+Wait until all pods show Running status and 2/2 ready containers (indicating sidecar injection).
+
+Subtask 1.3: Configure Jaeger Tracing
+Create a Gateway for external access:
+cat << EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: bookinfo-gateway
+  namespace: bookinfo-tracing
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+EOF
+Create VirtualService for routing:
+cat << EOF | oc apply -f -
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: bookinfo
+  namespace: bookinfo-tracing
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - bookinfo-gateway
+  http:
+  - match:
+    - uri:
+        exact: /productpage
+    - uri:
+        prefix: /static
+    - uri:
+        exact: /login
+    - uri:
+        exact: /logout
+    - uri:
+        prefix: /api/v1/products
+    route:
+    - destination:
+        host: productpage
+        port:
+          number: 9080
+EOF
+Configure tracing sampling rate (optional - for more detailed traces):
+cat << EOF | oc apply -f -
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: tracing-config
+  namespace: istio-system
+spec:
+  values:
+    pilot:
+      traceSampling: 100.0
+EOF
+Subtask 1.4: Enable Application-Level Tracing
+Add tracing headers to the productpage service:
+oc get deployment productpage-v1 -n bookinfo-tracing -o yaml > productpage-deployment.yaml
+Edit the deployment to add tracing environment variables:
+cat << EOF | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: productpage-v1
+  namespace: bookinfo-tracing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: productpage
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: productpage
+        version: v1
+    spec:
+      containers:
+      - name: productpage
+        image: docker.io/istio/examples-bookinfo-productpage-v1:1.17.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9080
+        env:
+        - name: JAEGER_AGENT_HOST
+          value: "jaeger-agent.istio-system.svc.cluster.local"
+        - name: JAEGER_AGENT_PORT
+          value: "6831"
+        - name: JAEGER_SAMPLER_TYPE
+          value: "const"
+        - name: JAEGER_SAMPLER_PARAM
+          value: "1"
+EOF
+Task 2: Analyze Traces in the Jaeger UI
+Subtask 2.1: Access the Jaeger UI
+Get the Jaeger route:
+oc get route jaeger -n istio-system
+If no route exists, create one:
+oc expose service jaeger-query -n istio-system
+Get the Jaeger UI URL:
+echo "Jaeger UI: http://$(oc get route jaeger-query -n istio-system -o jsonpath='{.spec.host}')"
+Open the Jaeger UI in your browser using the URL from the previous command.
+Subtask 2.2: Generate Traffic for Tracing
+Get the application URL:
+export GATEWAY_URL=$(oc get route istio-ingressgateway -n istio-system -o jsonpath='{.spec.host}')
+echo "Application URL: http://$GATEWAY_URL/productpage"
+Generate some traffic to create traces:
+for i in {1..20}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+  echo "Request $i sent"
+  sleep 2
+done
+Generate traffic with different patterns:
+# Generate some failed requests
+for i in {1..5}; do
+  curl -s "http://$GATEWAY_URL/productpage?error=true" > /dev/null
+  echo "Error request $i sent"
+  sleep 1
+done
+
+# Generate requests with delays
+for i in {1..10}; do
+  curl -s "http://$GATEWAY_URL/productpage?delay=2" > /dev/null
+  echo "Delayed request $i sent"
+  sleep 3
+done
+Subtask 2.3: Explore Traces in Jaeger UI
+In the Jaeger UI, select the service from the dropdown:
+
+Choose productpage.bookinfo-tracing from the Service dropdown
+Set the lookback time to 1 hour
+Click Find Traces
+Analyze trace structure:
+
+Click on a trace to expand it
+Observe the span hierarchy showing service-to-service calls
+Note the timing information for each span
+Examine tags and logs within spans
+Understand trace components:
+
+Trace ID: Unique identifier for the entire request
+Span ID: Unique identifier for each operation
+Parent-Child relationships: How services call each other
+Duration: Time taken for each operation
+Subtask 2.4: Use Jaeger Search Features
+Search by operation:
+
+In the Operation dropdown, select specific operations
+Try searching for HTTP GET operations
+Filter by tags:
+
+Use the Tags field to filter traces
+Example: http.status_code=200 or error=true
+Search by duration:
+
+Set minimum and maximum duration filters
+Find traces that took longer than 1 second
+Use the trace comparison feature:
+
+Select multiple traces
+Click Compare to see differences
+Task 3: Pinpoint Latency Bottlenecks and Failed Requests
+Subtask 3.1: Identify Performance Bottlenecks
+Create a service with artificial latency:
+cat << EOF | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slow-service
+  namespace: bookinfo-tracing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: slow-service
+  template:
+    metadata:
+      labels:
+        app: slow-service
+    spec:
+      containers:
+      - name: slow-service
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        command: ["/bin/sh"]
+        args: ["-c", "while true; do sleep 2; echo 'Slow response' | nc -l -p 80; done"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slow-service
+  namespace: bookinfo-tracing
+spec:
+  selector:
+    app: slow-service
+  ports:
+  - port: 80
+    targetPort: 80
+EOF
+Modify the productpage to call the slow service:
+# This simulates adding a slow dependency
+oc patch deployment productpage-v1 -n bookinfo-tracing -p '{"spec":{"template":{"spec":{"containers":[{"name":"productpage","env":[{"name":"SLOW_SERVICE_URL","value":"http://slow-service.bookinfo-tracing.svc.cluster.local"}]}]}}}}'
+Generate traffic and analyze bottlenecks:
+for i in {1..10}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+  echo "Request $i with slow dependency sent"
+  sleep 1
+done
+In Jaeger UI, identify bottlenecks:
+Look for traces with long durations
+Identify spans that take the most time
+Use the timeline view to see where time is spent
+Check for parallel vs sequential operations
+Subtask 3.2: Analyze Failed Requests
+Create a service that occasionally fails:
+cat << EOF | oc apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flaky-service
+  namespace: bookinfo-tracing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flaky-service
+  template:
+    metadata:
+      labels:
+        app: flaky-service
+    spec:
+      containers:
+      - name: flaky-service
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        command: ["/bin/sh"]
+        args: ["-c", "while true; do if [ $((RANDOM % 3)) -eq 0 ]; then echo 'HTTP/1.1 500 Internal Server Error' | nc -l -p 80; else echo 'HTTP/1.1 200 OK' | nc -l -p 80; fi; done"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flaky-service
+  namespace: bookinfo-tracing
+spec:
+  selector:
+    app: flaky-service
+  ports:
+  - port: 80
+    targetPort: 80
+EOF
+Generate traffic to create failures:
+for i in {1..20}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+  echo "Request $i sent (some may fail)"
+  sleep 1
+done
+Analyze failed requests in Jaeger:
+Filter traces by error=true tag
+Look for red spans indicating errors
+Examine error messages and stack traces
+Identify error propagation patterns
+Subtask 3.3: Advanced Trace Analysis
+Use Jaeger's dependency graph:
+
+Navigate to the Dependencies tab
+Observe service relationships
+Identify critical path dependencies
+Analyze trace statistics:
+
+Look at percentile distributions (P50, P95, P99)
+Identify outlier traces
+Compare error rates across services
+Create custom dashboards (if Grafana is available):
+
+# Check if Grafana is available
+oc get pods -n istio-system | grep grafana
+Export trace data for further analysis:
+# Get trace data via API
+JAEGER_URL=$(oc get route jaeger-query -n istio-system -o jsonpath='{.spec.host}')
+curl "http://$JAEGER_URL/api/traces?service=productpage.bookinfo-tracing&limit=10" | jq '.'
+Subtask 3.4: Implement Tracing Best Practices
+Add custom spans to your application (example for Python):
+# Example code for adding custom spans
+from jaeger_client import Config
+import opentracing
+
+def create_tracer(service_name):
+    config = Config(
+        config={
+            'sampler': {'type': 'const', 'param': 1},
+            'logging': True,
+        },
+        service_name=service_name,
+    )
+    return config.initialize_tracer()
+
+def traced_function():
+    tracer = opentracing.tracer
+    with tracer.start_span('custom-operation') as span:
+        span.set_tag('custom.tag', 'value')
+        # Your business logic here
+        span.log_kv({'event': 'processing', 'item_count': 10})
+Configure sampling strategies:
+cat << EOF | oc apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-sampling-configuration
+  namespace: istio-system
+data:
+  sampling_strategies.json: |
+    {
+      "default_strategy": {
+        "type": "probabilistic",
+        "param": 0.1
+      },
+      "per_service_strategies": [
+        {
+          "service": "productpage.bookinfo-tracing",
+          "type": "probabilistic",
+          "param": 1.0
+        }
+      ]
+    }
+EOF
+Monitor Jaeger performance:
+# Check Jaeger collector metrics
+oc exec -n istio-system deployment/jaeger-collector -- curl localhost:14269/metrics
+Troubleshooting Common Issues
+Issue 1: No Traces Appearing
+Symptoms: Jaeger UI shows no traces despite generating traffic
+
+Solutions:
+
+Check if services are properly injected with sidecars:
+oc get pods -n bookinfo-tracing -o jsonpath='{.items[*].spec.containers[*].name}'
+Verify Jaeger agent connectivity:
+oc logs -n bookinfo-tracing deployment/productpage-v1 -c istio-proxy | grep jaeger
+Check sampling configuration:
+oc get configmap istio -n istio-system -o yaml | grep -A 10 defaultConfig
+Issue 2: Incomplete Traces
+Symptoms: Traces show only some services, missing spans
+
+Solutions:
+
+Ensure all services have proper headers propagation
+Check for network policies blocking communication
+Verify service mesh member roll includes all namespaces
+Issue 3: High Latency in Jaeger UI
+Symptoms: Jaeger UI is slow to load traces
+
+Solutions:
+
+Reduce trace retention period
+Implement proper sampling strategies
+Scale Jaeger components if needed
+Verification and Testing
+Verify Your Setup
+Check that traces are being generated:
+# Generate test traffic
+curl -s "http://$GATEWAY_URL/productpage" > /dev/null
+
+# Check Jaeger for traces (should see recent traces)
+echo "Check Jaeger UI for traces from productpage.bookinfo-tracing service"
+Verify error tracking:
+# Generate an error
+curl -s "http://$GATEWAY_URL/nonexistent" > /dev/null
+
+# Check for error traces in Jaeger UI
+echo "Look for traces with error=true tag in Jaeger UI"
+Test performance analysis:
+# Generate load
+for i in {1..50}; do
+  curl -s "http://$GATEWAY_URL/productpage" > /dev/null &
+done
+wait
+
+echo "Analyze the performance patterns in Jaeger UI"
+Conclusion
+In this lab, you have successfully:
+
+Configured Jaeger distributed tracing for microservices in OpenShift Service Mesh
+Deployed and instrumented a sample application with tracing capabilities
+Analyzed request flows using the Jaeger UI to understand service interactions
+Identified performance bottlenecks by examining span durations and dependencies
+Troubleshot failed requests using trace data and error information
+Implemented tracing best practices including sampling strategies and custom instrumentation
+Key Takeaways
+Distributed tracing with Jaeger provides crucial visibility into microservices architectures by:
+
+Tracking requests across multiple service boundaries
+Identifying performance bottlenecks and latency sources
+Debugging complex distributed systems with detailed trace information
+Monitoring service dependencies and their health
+Providing data-driven insights for optimization decisions
+Why This Matters
+In production environments, distributed tracing is essential for:
+
+Maintaining system reliability by quickly identifying issues
+Optimizing performance by understanding request flows
+Reducing mean time to resolution (MTTR) for incidents
+Capacity planning based on actual usage patterns
+Ensuring SLA compliance through proactive monitoring
+The skills you've learned in this lab are directly applicable to real-world scenarios where observability and system reliability are critical for business success. Jaeger's integration with OpenShift Service Mesh provides a powerful platform for maintaining and optimizing distributed applications at scale.
